@@ -1008,7 +1008,7 @@ where
 /// Report for a single object in the heap analysis.
 ///
 /// Contains information about an object's retained size and identification.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ObjectReport {
     /// The HPROF object ID (0 for non-object nodes like SuperRoot, Root, Class).
     pub object_id: u64,
@@ -1020,6 +1020,7 @@ pub struct ObjectReport {
     /// Retained size = shallow size + sum of retained sizes of all children in dominator tree.
     pub retained_size: u64,
     /// The node index in the graph (for reference).
+    #[serde(skip_serializing)]
     pub node_index: NodeIndex,
 }
 
