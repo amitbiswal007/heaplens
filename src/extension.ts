@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { JsonRpcClient } from './client';
 import { RustClient } from './rustClient';
+import { HeapAnalysisWebviewProvider } from './webviewProvider';
 
 let client: JsonRpcClient | null = null;
 let rustClient: RustClient | null = null;
@@ -85,6 +86,8 @@ function spawnRustProcess(): ChildProcess | null {
 export function activate(context: vscode.ExtensionContext) {
     outputChannel = vscode.window.createOutputChannel('Heap Analyzer');
     outputChannel.appendLine('Heap Analyzer extension activated');
+    
+    const extensionUri = context.extensionUri;
 
     const disposable = vscode.commands.registerCommand('heapAnalyzer.parse', async () => {
         const fileUri = await vscode.window.showOpenDialog({
@@ -195,11 +198,24 @@ export function activate(context: vscode.ExtensionContext) {
             analysisComplete = true;
             if (params.status === 'completed') {
                 analysisResult = params.top_objects || [];
+                const topLayers = params.top_layers || [];
+                
                 outputChannel?.appendLine('Analysis completed successfully!');
                 outputChannel?.appendLine(`Found ${analysisResult.length} top objects by retained size`);
                 outputChannel?.appendLine('');
                 outputChannel?.appendLine('Top Objects:');
                 outputChannel?.appendLine(JSON.stringify(analysisResult, null, 2));
+                
+                // Create and show webview with Sunburst chart
+                if (rustClient) {
+                    HeapAnalysisWebviewProvider.createOrShow(extensionUri, rustClient, hprofPath);
+                }
+                
+                // Update webview with initial data (top 2 layers)
+                if (topLayers.length > 0) {
+                    HeapAnalysisWebviewProvider.updateWithData(topLayers);
+                }
+                
                 vscode.window.showInformationMessage(
                     `HPROF analysis completed: ${analysisResult.length} objects analyzed`
                 );

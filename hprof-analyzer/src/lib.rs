@@ -10,9 +10,11 @@ use jvm_hprof::{parse_hprof, RecordTag, Id, IdSize};
 use memmap2::{Mmap, MmapOptions};
 use petgraph::{Graph, Directed, graph::NodeIndex};
 use petgraph::algo::dominators;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use thiserror::Error;
 
 /// Errors that can occur during HPROF file loading and mapping.
@@ -1263,6 +1265,291 @@ pub fn calculate_dominators(graph: &HeapGraph) -> Result<Vec<ObjectReport>> {
     }
 
     Ok(top_50)
+}
+
+/// Analysis state containing the dominator tree information.
+/// 
+/// This structure holds all the data needed to query children of nodes
+/// for lazy loading in the visualization.
+/// 
+/// Note: The HeapGraph itself is not stored here to avoid cloning overhead.
+/// Instead, we store the necessary mappings and the graph can be queried
+/// separately when needed.
+#[derive(Debug, Clone)]
+pub struct AnalysisState {
+    /// Mapping from node index to its children in the dominator tree.
+    pub children_map: HashMap<NodeIndex, Vec<NodeIndex>>,
+    /// Mapping from node index to retained size.
+    pub retained_sizes: HashMap<NodeIndex, u64>,
+    /// Mapping from node index to shallow size.
+    pub shallow_sizes: HashMap<NodeIndex, u64>,
+    /// Mapping from HPROF object ID to node index.
+    pub id_to_node: HashMap<u64, NodeIndex>,
+    /// The super root node index.
+    pub super_root: NodeIndex,
+    /// Mapping from node index to node data (for querying node info).
+    pub node_data_map: HashMap<NodeIndex, (u64, String)>,
+}
+
+impl AnalysisState {
+    /// Gets the children of a node in the dominator tree.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `object_id` - The HPROF object ID (0 for SuperRoot, Root, Class nodes)
+    /// 
+    /// # Returns
+    /// 
+    /// Returns a vector of ObjectReport for the children, or None if the node is not found.
+    pub fn get_children(&self, object_id: u64) -> Option<Vec<ObjectReport>> {
+        // Find the node index for this object ID
+        let node_idx = if object_id == 0 {
+            // For SuperRoot, use the super_root node
+            self.super_root
+        } else {
+            // Look up by object ID
+            *self.id_to_node.get(&object_id)??
+        };
+
+        // Get children from the dominator tree
+        let children_indices = self.children_map.get(&node_idx)?;
+
+        // Build ObjectReport for each child
+        let mut children_reports = Vec::new();
+
+        for &child_idx in children_indices {
+            let (child_object_id, node_type) = self.node_data_map.get(&child_idx)
+                .cloned()
+                .unwrap_or((0, "Unknown".to_string()));
+            
+            let shallow = self.shallow_sizes.get(&child_idx).copied().unwrap_or(0);
+            let retained = self.retained_sizes.get(&child_idx).copied().unwrap_or(0);
+
+            children_reports.push(ObjectReport::new(
+                child_object_id,
+                node_type,
+                shallow,
+                retained,
+                child_idx,
+            ));
+        }
+
+        // Sort by retained size (descending)
+        children_reports.sort();
+        Some(children_reports)
+    }
+
+    /// Gets the top N layers of the dominator tree starting from SuperRoot.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `max_depth` - Maximum depth to traverse (default: 2 for top 2 layers)
+    /// * `max_nodes` - Maximum number of nodes to return (default: 50)
+    /// 
+    /// # Returns
+    /// 
+    /// Returns a tree structure with nodes and their immediate children.
+    pub fn get_top_layers(&self, max_depth: usize, max_nodes: usize) -> Vec<ObjectReport> {
+        let mut result = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        
+        // Start from SuperRoot
+        queue.push_back((self.super_root, 0));
+        visited.insert(self.super_root);
+
+        while let Some((node_idx, depth)) = queue.pop_front() {
+            if depth >= max_depth || result.len() >= max_nodes {
+                break;
+            }
+
+            let (object_id, node_type) = self.node_data_map.get(&node_idx)
+                .cloned()
+                .unwrap_or((0, "Unknown".to_string()));
+            
+            let shallow = self.shallow_sizes.get(&node_idx).copied().unwrap_or(0);
+            let retained = self.retained_sizes.get(&node_idx).copied().unwrap_or(0);
+
+            result.push(ObjectReport::new(
+                object_id,
+                node_type,
+                shallow,
+                retained,
+                node_idx,
+            ));
+
+            // Add children to queue for next level
+            if depth + 1 < max_depth {
+                if let Some(children) = self.children_map.get(&node_idx) {
+                    for &child_idx in children {
+                        if !visited.contains(&child_idx) && result.len() < max_nodes {
+                            visited.insert(child_idx);
+                            queue.push_back((child_idx, depth + 1));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort by retained size (descending)
+        result.sort();
+        result
+    }
+}
+
+/// Calculates dominators and returns both top objects and analysis state.
+/// 
+/// This is similar to `calculate_dominators` but also returns the analysis state
+/// needed for lazy loading queries.
+pub fn calculate_dominators_with_state(graph: &HeapGraph) -> Result<(Vec<ObjectReport>, AnalysisState)> {
+    log::debug!("Calculating dominators with state for {} nodes", graph.node_count());
+
+    let petgraph = graph.graph();
+    let super_root = graph.super_root();
+
+    // Step 1: Compute dominator tree
+    let dominators = dominators::simple_fast(petgraph, super_root)
+        .ok_or_else(|| anyhow::anyhow!("Failed to compute dominators"))?;
+
+    log::info!("Dominator tree computed successfully");
+
+    // Step 2: Build children map
+    let mut children_map: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
+
+    for node_idx in petgraph.node_indices() {
+        if node_idx == super_root {
+            continue;
+        }
+
+        if let Some(dominator) = dominators.immediate_dominator(node_idx) {
+            children_map.entry(dominator).or_insert_with(Vec::new).push(node_idx);
+        }
+    }
+
+    log::debug!("Built children map: {} nodes have children", children_map.len());
+
+    // Step 3: Calculate shallow sizes
+    let mut shallow_sizes: HashMap<NodeIndex, u64> = HashMap::new();
+
+    for node_idx in petgraph.node_indices() {
+        let node_data = &petgraph[node_idx];
+        let shallow_size = match node_data {
+            NodeData::SuperRoot | NodeData::Root | NodeData::Class => 0,
+            NodeData::Instance { size, .. } => *size as u64,
+            NodeData::Array { size, .. } => *size as u64,
+        };
+        shallow_sizes.insert(node_idx, shallow_size);
+    }
+
+    // Step 4: Calculate retained sizes
+    let mut retained_sizes: HashMap<NodeIndex, u64> = HashMap::new();
+    let mut processed = std::collections::HashSet::new();
+
+    // Initialize all nodes with their shallow sizes
+    for node_idx in petgraph.node_indices() {
+        let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
+        retained_sizes.insert(node_idx, shallow);
+    }
+
+    // Process nodes bottom-up
+    let mut changed = true;
+    while changed {
+        changed = false;
+
+        for node_idx in petgraph.node_indices() {
+            if processed.contains(&node_idx) {
+                continue;
+            }
+
+            let all_children_processed = children_map
+                .get(&node_idx)
+                .map_or(true, |node_children| {
+                    node_children.iter().all(|&c| processed.contains(&c))
+                });
+
+            if all_children_processed {
+                let mut retained = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
+
+                if let Some(node_children) = children_map.get(&node_idx) {
+                    for &child in node_children {
+                        let child_retained = retained_sizes.get(&child).copied().unwrap_or(0);
+                        retained += child_retained;
+                    }
+                }
+
+                retained_sizes.insert(node_idx, retained);
+                processed.insert(node_idx);
+                changed = true;
+            }
+        }
+    }
+
+    // Handle any remaining nodes
+    for node_idx in petgraph.node_indices() {
+        if !processed.contains(&node_idx) {
+            let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
+            retained_sizes.insert(node_idx, shallow);
+        }
+    }
+
+    log::info!("Calculated retained sizes for {} nodes", retained_sizes.len());
+
+    // Step 5: Build ObjectReport for all nodes
+    let mut reports: Vec<ObjectReport> = Vec::new();
+
+    for node_idx in petgraph.node_indices() {
+        let node_data = &petgraph[node_idx];
+        let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
+        let retained = retained_sizes.get(&node_idx).copied().unwrap_or(0);
+
+        let (object_id, node_type) = match node_data {
+            NodeData::SuperRoot => (0, "SuperRoot".to_string()),
+            NodeData::Root => (0, "Root".to_string()),
+            NodeData::Class => (0, "Class".to_string()),
+            NodeData::Instance { id, .. } => (*id, "Instance".to_string()),
+            NodeData::Array { id, .. } => (*id, "Array".to_string()),
+        };
+
+        reports.push(ObjectReport::new(
+            object_id,
+            node_type,
+            shallow,
+            retained,
+            node_idx,
+        ));
+    }
+
+    // Step 6: Sort and take top 50
+    reports.sort();
+    let top_50: Vec<ObjectReport> = reports.into_iter().take(50).collect();
+
+    // Build node data map for quick lookups
+    let mut node_data_map: HashMap<NodeIndex, (u64, String)> = HashMap::new();
+    for node_idx in petgraph.node_indices() {
+        let node_data = &petgraph[node_idx];
+        let (object_id, node_type) = match node_data {
+            NodeData::SuperRoot => (0, "SuperRoot".to_string()),
+            NodeData::Root => (0, "Root".to_string()),
+            NodeData::Class => (0, "Class".to_string()),
+            NodeData::Instance { id, .. } => (*id, "Instance".to_string()),
+            NodeData::Array { id, .. } => (*id, "Array".to_string()),
+        };
+        node_data_map.insert(node_idx, (object_id, node_type));
+    }
+
+    // Build analysis state
+    let id_to_node = graph.id_to_node().clone();
+
+    let state = AnalysisState {
+        children_map,
+        retained_sizes,
+        shallow_sizes,
+        id_to_node,
+        super_root: graph.super_root(),
+        node_data_map,
+    };
+
+    Ok((top_50, state))
 }
 
 #[cfg(test)]

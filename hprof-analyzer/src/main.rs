@@ -4,10 +4,12 @@
 //! heap analysis tasks asynchronously using tokio blocking tasks.
 
 use anyhow::{Context, Result};
-use hprof_analyzer::{build_graph, calculate_dominators, HprofLoader};
+use hprof_analyzer::{build_graph, calculate_dominators_with_state, HprofLoader};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::signal;
 use tokio::sync::mpsc;
@@ -57,8 +59,20 @@ struct AnalyzeHeapResult {
     status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     top_objects: Option<Vec<hprof_analyzer::ObjectReport>>,
+    /// Top 2 layers of the dominator tree for initial visualization.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_layers: Option<Vec<hprof_analyzer::ObjectReport>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+/// Analysis state stored per file path.
+#[derive(Clone)]
+struct FileAnalysisState {
+    /// The analysis state for querying children.
+    state: Arc<RwLock<Option<hprof_analyzer::AnalysisState>>>,
+    /// The file path this analysis is for.
+    path: PathBuf,
 }
 
 /// Server state and configuration.
@@ -69,6 +83,8 @@ struct Server {
     result_tx: mpsc::UnboundedSender<AnalyzeHeapResult>,
     /// Channel receiver for analysis results.
     result_rx: mpsc::UnboundedReceiver<AnalyzeHeapResult>,
+    /// Stored analysis states keyed by file path.
+    analysis_states: Arc<RwLock<HashMap<PathBuf, FileAnalysisState>>>,
 }
 
 impl Server {
@@ -79,6 +95,7 @@ impl Server {
             request_id_counter: AtomicU64::new(1),
             result_tx,
             result_rx,
+            analysis_states: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -92,6 +109,9 @@ impl Server {
         match request.method.as_str() {
             "analyze_heap" => {
                 self.handle_analyze_heap(request, stdout).await?;
+            }
+            "get_children" => {
+                self.handle_get_children(request, stdout).await?;
             }
             _ => {
                 // Unknown method - send error response
@@ -141,13 +161,14 @@ impl Server {
         };
         self.send_response(stdout, &processing_response)?;
 
-        // Clone the result sender for the blocking task
+        // Clone the result sender and analysis states for the blocking task
         let result_tx = self.result_tx.clone();
+        let analysis_states = self.analysis_states.clone();
         let path_buf_clone = path_buf.clone();
 
         // Spawn blocking task for CPU-intensive work
         task::spawn_blocking(move || {
-            let result = analyze_heap_blocking(path_buf_clone, request_id);
+            let result = analyze_heap_blocking(path_buf_clone.clone(), request_id, analysis_states);
 
             // Send result via channel (non-blocking)
             if let Err(e) = result_tx.send(result) {
@@ -165,6 +186,67 @@ impl Server {
         writeln!(stdout, "{}", json)
             .context("Failed to write response to stdout")?;
         stdout.flush().context("Failed to flush stdout")?;
+        Ok(())
+    }
+
+    /// Handles the get_children request.
+    async fn handle_get_children(
+        &self,
+        request: JsonRpcRequest,
+        stdout: &mut io::StdoutLock<'_>,
+    ) -> Result<()> {
+        // Extract parameters
+        let params = request.params.ok_or_else(|| anyhow::anyhow!("Missing params"))?;
+        let path = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'path' parameter"))?;
+        let object_id = params
+            .get("object_id")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'object_id' parameter"))?;
+
+        let request_id = request.id.ok_or_else(|| anyhow::anyhow!("Request ID required"))?;
+
+        // Get analysis state for this file
+        let analysis_states = self.analysis_states.read()
+            .map_err(|e| anyhow::anyhow!("Failed to read analysis states: {}", e))?;
+        
+        let file_state = analysis_states.get(&PathBuf::from(path))
+            .ok_or_else(|| anyhow::anyhow!("No analysis found for file: {}", path))?;
+
+        let state_guard = file_state.state.read()
+            .map_err(|e| anyhow::anyhow!("Failed to read analysis state: {}", e))?;
+
+        let analysis_state = state_guard.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Analysis state not available"))?;
+
+        // Get children
+        match analysis_state.get_children(object_id) {
+            Some(children) => {
+                let response = JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: request_id,
+                    result: Some(serde_json::to_value(children)?),
+                    error: None,
+                };
+                self.send_response(stdout, &response)?;
+            }
+            None => {
+                let error_response = JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: request_id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32000,
+                        message: format!("Node not found or has no children: object_id={}", object_id),
+                        data: None,
+                    }),
+                };
+                self.send_response(stdout, &error_response)?;
+            }
+        }
+
         Ok(())
     }
 
@@ -204,16 +286,25 @@ impl Server {
 ///
 /// This function is meant to be called from `tokio::task::spawn_blocking`
 /// to avoid blocking the async runtime.
-fn analyze_heap_blocking(path: PathBuf, request_id: u64) -> AnalyzeHeapResult {
+fn analyze_heap_blocking(
+    path: PathBuf,
+    request_id: u64,
+    analysis_states: Arc<RwLock<HashMap<PathBuf, FileAnalysisState>>>,
+) -> AnalyzeHeapResult {
     log::info!("Starting heap analysis for: {:?} (request_id: {})", path, request_id);
 
-    match analyze_heap_internal(&path) {
-        Ok(top_objects) => {
+    match analyze_heap_internal(&path, analysis_states.clone()) {
+        Ok((top_objects, analysis_state)) => {
             log::info!("Heap analysis completed successfully (request_id: {})", request_id);
+            
+            // Get top 2 layers for initial visualization
+            let top_layers = analysis_state.get_top_layers(2, 50);
+            
             AnalyzeHeapResult {
                 request_id,
                 status: "completed".to_string(),
                 top_objects: Some(top_objects),
+                top_layers: Some(top_layers),
                 error: None,
             }
         }
@@ -224,6 +315,7 @@ fn analyze_heap_blocking(path: PathBuf, request_id: u64) -> AnalyzeHeapResult {
                 request_id,
                 status: "error".to_string(),
                 top_objects: None,
+                top_layers: None,
                 error: Some(error_msg),
             }
         }
@@ -231,7 +323,10 @@ fn analyze_heap_blocking(path: PathBuf, request_id: u64) -> AnalyzeHeapResult {
 }
 
 /// Internal function that performs the actual heap analysis.
-fn analyze_heap_internal(path: &PathBuf) -> Result<Vec<hprof_analyzer::ObjectReport>> {
+fn analyze_heap_internal(
+    path: &PathBuf,
+    analysis_states: Arc<RwLock<HashMap<PathBuf, FileAnalysisState>>>,
+) -> Result<(Vec<hprof_analyzer::ObjectReport>, hprof_analyzer::AnalysisState)> {
     // Step 1: Load and map the HPROF file
     let loader = HprofLoader::new(path.clone());
     let mmap = loader.map_file()
@@ -247,11 +342,24 @@ fn analyze_heap_internal(path: &PathBuf) -> Result<Vec<hprof_analyzer::ObjectRep
                 graph.node_count(), 
                 graph.edge_count());
 
-    // Step 3: Calculate dominators and retained sizes
-    let top_objects = calculate_dominators(&graph)
+    // Step 3: Calculate dominators and retained sizes with state
+    let (top_objects, analysis_state) = calculate_dominators_with_state(&graph)
         .context("Failed to calculate dominators")?;
 
     log::info!("Analysis complete: {} top objects", top_objects.len());
+
+    // Step 4: Store analysis state for lazy loading queries
+    {
+        let mut states = analysis_states.write()
+            .map_err(|e| anyhow::anyhow!("Failed to write analysis states: {}", e))?;
+        
+        states.insert(path.clone(), FileAnalysisState {
+            state: Arc::new(RwLock::new(Some(analysis_state))),
+            path: path.clone(),
+        });
+    }
+
+    log::debug!("Stored analysis state for: {:?}", path);
 
     Ok(top_objects)
 }
