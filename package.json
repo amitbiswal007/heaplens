@@ -10,7 +10,8 @@
     "Other"
   ],
   "activationEvents": [
-    "onCommand:heapAnalyzer.parse"
+    "onCommand:heapAnalyzer.parse",
+    "onCommand:javaheap.analyzeFile"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -18,6 +19,10 @@
       {
         "command": "heapAnalyzer.parse",
         "title": "Parse HPROF File"
+      },
+      {
+        "command": "javaheap.analyzeFile",
+        "title": "Analyze HPROF File"
       }
     ]
   },
