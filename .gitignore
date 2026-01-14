@@ -1,0 +1,38 @@
+# Node.js
+node_modules/
+out/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Rust
+target/
+Cargo.lock
+**/*.rs.bk
+
+# Build artifacts
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files
+*.hprof
+*.hprof.*
+
+# Documentation (keep markdown files, but ignore generated docs)
+/doc/
+/docs/

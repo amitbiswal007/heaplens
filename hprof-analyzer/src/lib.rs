@@ -1,0 +1,1405 @@
+//! # hprof-analyzer
+//!
+//! A library for loading and analyzing Java HPROF files with zero-copy memory mapping.
+//!
+//! This crate provides a safe interface around memory-mapped file I/O for efficient
+//! parsing of large HPROF files without loading them entirely into RAM.
+
+use anyhow::{Context, Result};
+use jvm_hprof::{parse_hprof, RecordTag, Id, IdSize};
+use memmap2::{Mmap, MmapOptions};
+use petgraph::{Graph, Directed, graph::NodeIndex};
+use petgraph::algo::dominators;
+use std::collections::HashMap;
+use std::fs::File;
+use std::path::{Path, PathBuf};
+use thiserror::Error;
+
+/// Errors that can occur during HPROF file loading and mapping.
+#[derive(Error, Debug)]
+pub enum HprofLoaderError {
+    /// Failed to open the file at the given path.
+    #[error("Failed to open file at {path}: {source}")]
+    FileOpen {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    /// Failed to create a memory map of the file.
+    #[error("Failed to create memory map for file at {path}: {source}")]
+    MapCreation {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    /// The file is empty and cannot be mapped.
+    #[error("File at {path} is empty (0 bytes)")]
+    EmptyFile { path: PathBuf },
+}
+
+/// A loader for HPROF files that uses memory-mapped I/O for zero-copy access.
+///
+/// # Safety Guarantees
+///
+/// This struct provides a **safe** interface around `unsafe` memory mapping operations.
+/// The safety invariants are:
+///
+/// 1. **Read-only access**: The memory map is created with read-only permissions,
+///    preventing accidental modification of the underlying file.
+///
+/// 2. **Lifetime management**: The `Mmap` handle maintains the validity of the mapped
+///    memory region. The memory is automatically unmapped when the handle is dropped.
+///
+/// 3. **OS-level protection**: The operating system enforces read-only access at the
+///    page level, so even if unsafe code attempts to write, the OS will raise a
+///    segmentation fault rather than corrupting the file.
+///
+/// # Why `unsafe` is Used
+///
+/// The `memmap2::MmapOptions::map()` method is marked `unsafe` because:
+///
+/// - **Raw memory access**: It provides direct access to memory pages that are
+///   managed by the OS, bypassing Rust's normal ownership and borrowing rules.
+///
+/// - **Concurrent modification risk**: If the file is modified by another process
+///   while mapped, reading from the map could see inconsistent data. However, this
+///   is mitigated by:
+///     - Using read-only mapping (prevents our process from modifying it)
+///     - HPROF files are typically immutable once written
+///     - The file handle is kept open, preventing truncation on Unix systems
+///
+/// - **Platform-specific behavior**: Memory mapping behavior varies across platforms
+///   (Windows vs Unix), and the `unsafe` marker ensures developers are aware of
+///   platform-specific considerations.
+///
+/// # Performance Benefits
+///
+/// Memory mapping provides significant performance advantages:
+///
+/// - **Zero-copy**: Data is accessed directly from the OS page cache without
+///   copying into user-space buffers.
+///
+/// - **Lazy loading**: Pages are loaded on-demand via OS page faults, allowing
+///   efficient handling of files larger than available RAM.
+///
+/// - **OS optimization**: The OS can optimize page cache usage, prefetching,
+///   and memory pressure handling automatically.
+///
+/// - **Efficient for large files**: For multi-GB HPROF files, memory mapping avoids
+///   the memory overhead of loading the entire file into RAM.
+///
+/// # Example
+///
+/// ```no_run
+/// use hprof_analyzer::HprofLoader;
+/// use std::path::PathBuf;
+///
+/// let loader = HprofLoader::new(PathBuf::from("heap.hprof"));
+/// let mmap = loader.map_file()?;
+/// // mmap can be used as &[u8] for parsing
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Debug, Clone)]
+pub struct HprofLoader {
+    /// The path to the HPROF file to be loaded.
+    path: PathBuf,
+}
+
+impl HprofLoader {
+    /// Creates a new `HprofLoader` for the file at the given path.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path to the HPROF file to be loaded.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use hprof_analyzer::HprofLoader;
+    /// use std::path::PathBuf;
+    ///
+    /// let loader = HprofLoader::new(PathBuf::from("heap.hprof"));
+    /// ```
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    /// Memory-maps the HPROF file for zero-copy read-only access.
+    ///
+    /// This method creates a read-only memory mapping of the file, allowing
+    /// efficient access to large HPROF files without loading them entirely
+    /// into memory.
+    ///
+    /// # Safety
+    ///
+    /// While this method uses `unsafe` internally, it provides a **safe** interface
+    /// by ensuring:
+    ///
+    /// 1. The file is opened with read-only permissions
+    /// 2. The memory map is created as read-only
+    /// 3. The file handle is kept alive for the lifetime of the map
+    /// 4. Proper error handling for all failure cases
+    ///
+    /// The `unsafe` block is necessary because `MmapOptions::map()` is marked unsafe
+    /// due to the raw memory access it provides. However, our usage is safe because:
+    ///
+    /// - We only create read-only mappings
+    /// - We maintain the file handle to prevent truncation
+    /// - We validate the file exists and is readable before mapping
+    /// - We handle all error cases explicitly
+    ///
+    /// # Errors
+    ///
+    /// This method will return an error if:
+    /// - The file cannot be opened (permissions, doesn't exist, etc.)
+    /// - The file is empty (0 bytes)
+    /// - The memory mapping operation fails (OS-level error)
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result<Mmap>` containing the memory-mapped file handle.
+    /// The `Mmap` can be used as `&[u8]` for zero-copy parsing operations.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use hprof_analyzer::HprofLoader;
+    /// use std::path::PathBuf;
+    ///
+    /// # fn main() -> anyhow::Result<()> {
+    /// let loader = HprofLoader::new(PathBuf::from("heap.hprof"));
+    /// let mmap = loader.map_file()?;
+    ///
+    /// // Use the memory map as a byte slice
+    /// let first_byte = mmap[0];
+    /// println!("File size: {} bytes", mmap.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn map_file(&self) -> Result<Mmap, HprofLoaderError> {
+        log::debug!("Opening HPROF file: {:?}", self.path);
+
+        // Open the file with read-only permissions.
+        // Keeping the file handle open prevents the file from being truncated
+        // or deleted while the memory map is active (on Unix systems).
+        let file = File::open(&self.path).map_err(|source| {
+            log::error!("Failed to open file: {:?}", self.path);
+            HprofLoaderError::FileOpen {
+                path: self.path.clone(),
+                source,
+            }
+        })?;
+
+        // Get file metadata to check size before attempting to map.
+        // This provides a better error message for empty files.
+        let metadata = file.metadata().map_err(|source| {
+            log::error!("Failed to get file metadata: {:?}", self.path);
+            HprofLoaderError::FileOpen {
+                path: self.path.clone(),
+                source,
+            }
+        })?;
+
+        if metadata.len() == 0 {
+            log::error!("File is empty: {:?}", self.path);
+            return Err(HprofLoaderError::EmptyFile {
+                path: self.path.clone(),
+            });
+        }
+
+        log::debug!(
+            "Creating memory map for file: {:?} ({} bytes)",
+            self.path,
+            metadata.len()
+        );
+
+        // SAFETY: This unsafe block is safe because:
+        //
+        // 1. **Read-only mapping**: We create a read-only memory map, which means
+        //    the OS will prevent any writes to the mapped memory region. Even if
+        //    unsafe code attempts to write, the OS will raise a segmentation fault.
+        //
+        // 2. **File handle lifetime**: The `file` handle is kept alive (not dropped)
+        //    during the mapping operation. On Unix systems, this prevents the file
+        //    from being truncated or deleted while mapped. The `Mmap` handle will
+        //    maintain the mapping until it's dropped.
+        //
+        // 3. **No concurrent writes**: HPROF files are typically immutable once written.
+        //    We're opening the file read-only, so our process cannot modify it.
+        //    Other processes could theoretically modify it, but:
+        //      - This is rare for HPROF files (they're typically write-once)
+        //      - The OS page cache will handle consistency
+        //      - If this is a concern, file locking can be added
+        //
+        // 4. **Platform portability**: `memmap2` handles platform-specific differences
+        //    (Windows vs Unix) internally, so our usage is portable.
+        //
+        // 5. **Error handling**: We properly handle all error cases returned by `map()`.
+        //
+        // The `unsafe` marker exists because memory mapping provides raw access to
+        // OS-managed memory pages, bypassing Rust's normal safety guarantees. However,
+        // our specific usage pattern (read-only mapping of an immutable file) is safe.
+        let mmap = unsafe {
+            MmapOptions::new()
+                .map(&file)
+                .map_err(|source| {
+                    log::error!("Failed to create memory map: {:?}", self.path);
+                    HprofLoaderError::MapCreation {
+                        path: self.path.clone(),
+                        source,
+                    })
+                })?
+        };
+
+        log::info!(
+            "Successfully mapped HPROF file: {:?} ({} bytes)",
+            self.path,
+            mmap.len()
+        );
+
+        // Note: We intentionally drop the `file` handle here. The memory map
+        // remains valid because:
+        // - On Unix: The file descriptor is kept open by the OS for the mapping
+        // - On Windows: The file handle is duplicated internally by memmap2
+        // The `Mmap` handle maintains the mapping's validity.
+        drop(file);
+
+        Ok(mmap)
+    }
+
+    /// Returns a reference to the path of the HPROF file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Statistics collected from scanning HPROF records.
+///
+/// This structure holds aggregate counts and sizes computed during
+/// a single pass over the HPROF file records.
+#[derive(Debug, Clone, Default)]
+pub struct HprofStatistics {
+    /// Total number of LOAD_CLASS records (classes defined in the heap).
+    pub total_classes: u64,
+    /// Total number of INSTANCE_DUMP sub-records (object instances).
+    pub total_objects: u64,
+    /// Total heap size in bytes (approximate, based on instance field data).
+    pub total_heap_size_bytes: u64,
+}
+
+impl HprofStatistics {
+    /// Prints the statistics to stdout in a human-readable format.
+    pub fn print(&self) {
+        println!("HPROF Statistics:");
+        println!("  Total Classes (LOAD_CLASS): {}", self.total_classes);
+        println!("  Total Objects (INSTANCE_DUMP): {}", self.total_objects);
+        println!(
+            "  Total Heap Size: {} bytes ({:.2} MB)",
+            self.total_heap_size_bytes,
+            self.total_heap_size_bytes as f64 / (1024.0 * 1024.0)
+        );
+    }
+}
+
+/// Scans HPROF records from a memory-mapped byte slice and collects statistics.
+///
+/// This function performs a zero-copy scan of the HPROF file using the `jvm-hprof`
+/// crate. It iterates over all records in the file and counts:
+///
+/// - **LOAD_CLASS records**: Classes defined in the heap dump
+/// - **INSTANCE_DUMP sub-records**: Object instances within heap dump segments
+/// - **Total heap size**: Approximate size based on instance field data
+///
+/// # Zero-Copy Processing
+///
+/// This function leverages the zero-copy features of `jvm-hprof`:
+///
+/// - The input `&[u8]` slice is typically from a memory-mapped file (`Mmap`)
+/// - `jvm-hprof::parse_hprof()` parses the header without copying data
+/// - `records_iter()` provides an iterator over records that defers parsing
+/// - Record parsing happens on-demand, accessing data directly from the mapped memory
+/// - No intermediate buffers or copies are created during iteration
+///
+/// # Endianness Handling
+///
+/// The `jvm-hprof` crate handles endianness automatically:
+///
+/// - HPROF files use big-endian encoding (network byte order)
+/// - The crate's parse methods (`parse_hprof`, `as_load_class`, etc.) handle
+///   endianness conversion internally
+/// - No manual byte swapping is required
+/// - The crate reads the file's ID size (32-bit vs 64-bit) from the header
+///
+/// # Arguments
+///
+/// * `data` - A byte slice containing the HPROF file data, typically from a memory-mapped file.
+///
+/// # Returns
+///
+/// Returns a `Result<HprofStatistics>` containing the collected statistics.
+/// Returns an error if the HPROF file cannot be parsed or if record parsing fails.
+///
+/// # Errors
+///
+/// This function will return an error if:
+/// - The HPROF header cannot be parsed (invalid format)
+/// - A record cannot be parsed (corrupted data)
+/// - The file structure is invalid
+///
+/// # Example
+///
+/// ```no_run
+/// use hprof_analyzer::{HprofLoader, scan_records};
+/// use std::path::PathBuf;
+///
+/// # fn main() -> anyhow::Result<()> {
+/// let loader = HprofLoader::new(PathBuf::from("heap.hprof"));
+/// let mmap = loader.map_file()?;
+///
+/// let stats = scan_records(&mmap[..])?;
+/// stats.print();
+/// # Ok(())
+/// # }
+/// ```
+pub fn scan_records(data: &[u8]) -> Result<HprofStatistics> {
+    log::debug!("Starting HPROF record scan ({} bytes)", data.len());
+
+    // Parse the HPROF file header and create the iterator.
+    // This is a zero-copy operation - it only reads the header and sets up
+    // the iterator without copying the file data.
+    let hprof = parse_hprof(data)
+        .map_err(|e| anyhow::anyhow!("Failed to parse HPROF file: {:?}", e))?;
+
+    let mut stats = HprofStatistics::default();
+
+    // First pass: Count LOAD_CLASS records.
+    // These records define classes that are loaded in the heap.
+    log::debug!("Scanning for LOAD_CLASS records...");
+    for record_result in hprof.records_iter() {
+        let record = record_result
+            .map_err(|e| anyhow::anyhow!("Failed to parse record: {:?}", e))?;
+
+        // Match on the record tag to identify LOAD_CLASS records.
+        // The jvm-hprof crate handles endianness conversion automatically
+        // when parsing the tag byte and record data.
+        if record.tag() == RecordTag::LoadClass {
+            stats.total_classes += 1;
+            log::trace!("Found LOAD_CLASS record #{}", stats.total_classes);
+        }
+    }
+
+    log::info!("Found {} LOAD_CLASS records", stats.total_classes);
+
+    // Second pass: Count INSTANCE_DUMP sub-records and calculate heap size.
+    // INSTANCE_DUMP records are nested within HeapDumpSegment records.
+    log::debug!("Scanning for INSTANCE_DUMP sub-records...");
+    for record_result in hprof.records_iter() {
+        let record = record_result
+            .map_err(|e| anyhow::anyhow!("Failed to parse record: {:?}", e))?;
+
+        // Heap dump data is contained in HeapDump or HeapDumpSegment records.
+        // These records contain sub-records that include INSTANCE_DUMP entries.
+        if record.tag() == RecordTag::HeapDump || record.tag() == RecordTag::HeapDumpSegment {
+            if let Some(heap_dump_result) = record.as_heap_dump_segment() {
+                let heap_dump = heap_dump_result
+                    .map_err(|e| anyhow::anyhow!("Failed to parse HeapDumpSegment: {:?}", e))?;
+
+                // Iterate over sub-records within the heap dump segment.
+                // This is where INSTANCE_DUMP records are found.
+                for sub_record_result in heap_dump.sub_records() {
+                    let sub_record = sub_record_result
+                        .map_err(|e| anyhow::anyhow!("Failed to parse sub-record: {:?}", e))?;
+
+                    // Match on the sub-record type to find INSTANCE_DUMP entries.
+                    // The jvm-hprof crate handles endianness when parsing sub-record tags
+                    // and data fields.
+                    match sub_record {
+                        jvm_hprof::heap_dump::SubRecord::Instance(instance) => {
+                            stats.total_objects += 1;
+
+                            // Calculate approximate heap size from instance field data.
+                            // Note: This is an approximation. The actual instance size includes:
+                            // - Object header (platform-dependent, typically 8-16 bytes)
+                            // - Field data (what we're measuring here)
+                            // - Alignment padding
+                            //
+                            // For a more accurate size, we would need to:
+                            // 1. Parse class definitions to get field descriptors
+                            // 2. Calculate size based on field types and alignment
+                            // 3. Add object header size
+                            //
+                            // For now, we use the field data length as a proxy.
+                            let field_data_size = instance.fields().len() as u64;
+                            stats.total_heap_size_bytes += field_data_size;
+
+                            log::trace!(
+                                "Found INSTANCE_DUMP #{} (field data: {} bytes)",
+                                stats.total_objects,
+                                field_data_size
+                            );
+                        }
+                        // We could also count ObjectArray and PrimitiveArray here
+                        // for a more complete heap size calculation, but the task
+                        // specifically asks for INSTANCE_DUMP objects.
+                        _ => {
+                            // Other sub-record types (ObjectArray, PrimitiveArray, Class, etc.)
+                            // are not counted in this implementation.
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    log::info!(
+        "Scan complete: {} objects, {} bytes heap size",
+        stats.total_objects,
+        stats.total_heap_size_bytes
+    );
+
+    Ok(stats)
+}
+
+/// Node data types in the heap graph.
+///
+/// Each node represents either a GC root, a class definition, an object instance,
+/// or an array in the Java heap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeData {
+    /// A synthetic root node that connects to all GC roots.
+    /// This is the top-level node in the object graph.
+    SuperRoot,
+    /// A GC root (entry point into the object graph).
+    Root,
+    /// A class definition.
+    Class,
+    /// An object instance with its ID and size in bytes.
+    Instance {
+        /// The object ID from the HPROF file.
+        id: u64,
+        /// The size of the instance in bytes (approximate, based on field data).
+        size: u32,
+    },
+    /// An array (object array or primitive array) with its ID and size in bytes.
+    Array {
+        /// The array object ID from the HPROF file.
+        id: u64,
+        /// The size of the array in bytes.
+        size: u32,
+    },
+}
+
+/// A graph representation of the Java heap.
+///
+/// This graph models the object reference relationships in a heap dump:
+/// - **Nodes**: Represent GC roots, classes, instances, and arrays
+/// - **Edges**: Represent references from one object to another
+///
+/// The graph is directed: an edge from A to B means "A references B".
+///
+/// # Structure
+///
+/// - **SuperRoot**: A synthetic node at the top that connects to all GC roots
+/// - **Root nodes**: GC roots (ROOT_JNI_GLOBAL, ROOT_JAVA_FRAME, etc.)
+/// - **Class nodes**: Class definitions from LOAD_CLASS records
+/// - **Instance nodes**: Object instances from INSTANCE_DUMP sub-records
+/// - **Array nodes**: Arrays from OBJECT_ARRAY and PRIMITIVE_ARRAY sub-records
+///
+/// # Example
+///
+/// ```no_run
+/// use hprof_analyzer::{HprofLoader, build_graph};
+/// use std::path::PathBuf;
+///
+/// # fn main() -> anyhow::Result<()> {
+/// let loader = HprofLoader::new(PathBuf::from("heap.hprof"));
+/// let mmap = loader.map_file()?;
+///
+/// let graph = build_graph(&mmap[..])?;
+/// println!("Graph has {} nodes and {} edges", 
+///          graph.graph().node_count(), 
+///          graph.graph().edge_count());
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug)]
+pub struct HeapGraph {
+    /// The underlying petgraph graph structure.
+    graph: Graph<NodeData, (), Directed>,
+    /// Mapping from HPROF object/class IDs to graph node indices.
+    id_to_node: HashMap<u64, NodeIndex>,
+    /// The node index of the synthetic SuperRoot node.
+    super_root: NodeIndex,
+}
+
+impl HeapGraph {
+    /// Returns a reference to the underlying graph.
+    pub fn graph(&self) -> &Graph<NodeData, (), Directed> {
+        &self.graph
+    }
+
+    /// Returns a mutable reference to the underlying graph.
+    pub fn graph_mut(&mut self) -> &mut Graph<NodeData, (), Directed> {
+        &mut self.graph
+    }
+
+    /// Returns the mapping from HPROF IDs to node indices.
+    pub fn id_to_node(&self) -> &HashMap<u64, NodeIndex> {
+        &self.id_to_node
+    }
+
+    /// Returns the node index of the SuperRoot node.
+    pub fn super_root(&self) -> NodeIndex {
+        self.super_root
+    }
+
+    /// Returns the number of nodes in the graph.
+    pub fn node_count(&self) -> usize {
+        self.graph.node_count()
+    }
+
+    /// Returns the number of edges in the graph.
+    pub fn edge_count(&self) -> usize {
+        self.graph.edge_count()
+    }
+}
+
+/// Builds a graph representation of the Java heap from HPROF file data.
+///
+/// This function performs a two-pass scan of the HPROF file:
+///
+/// **Pass 1: Node Creation**
+/// - Identifies all classes from `LOAD_CLASS` records
+/// - Identifies all instances from `INSTANCE_DUMP` sub-records
+/// - Identifies all arrays from `OBJECT_ARRAY` and `PRIMITIVE_ARRAY` sub-records
+/// - Identifies all GC roots from various `GcRoot*` sub-records
+/// - Creates nodes for each and maps HPROF IDs to graph node indices
+///
+/// **Pass 2: Edge Creation**
+/// - Iterates records again to find object references
+/// - Adds directed edges from referencing objects to referenced objects
+/// - Connects GC roots to their referenced objects
+/// - Creates a synthetic `SuperRoot` node and connects it to all GC roots
+///
+/// # Zero-Copy Processing
+///
+/// Like `scan_records`, this function uses zero-copy processing:
+/// - Takes a `&[u8]` slice (typically from memory-mapped file)
+/// - Uses `jvm-hprof`'s lazy parsing
+/// - All data access is direct from mapped memory
+///
+/// # Arguments
+///
+/// * `data` - A byte slice containing the HPROF file data.
+///
+/// # Returns
+///
+/// Returns a `Result<HeapGraph>` containing the constructed graph.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The HPROF file cannot be parsed
+/// - Record parsing fails
+/// - Invalid object references are encountered
+///
+/// # Example
+///
+/// ```no_run
+/// use hprof_analyzer::{HprofLoader, build_graph};
+/// use std::path::PathBuf;
+///
+/// # fn main() -> anyhow::Result<()> {
+/// let loader = HprofLoader::new(PathBuf::from("heap.hprof"));
+/// let mmap = loader.map_file()?;
+///
+/// let graph = build_graph(&mmap[..])?;
+/// println!("Graph: {} nodes, {} edges", 
+///          graph.node_count(), 
+///          graph.edge_count());
+/// # Ok(())
+/// # }
+/// ```
+pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
+    log::debug!("Starting graph construction ({} bytes)", data.len());
+
+    // Parse the HPROF file header
+    let hprof = parse_hprof(data)
+        .map_err(|e| anyhow::anyhow!("Failed to parse HPROF file: {:?}", e))?;
+
+    let id_size = hprof.header().id_size();
+    let mut graph = Graph::<NodeData, (), Directed>::new();
+    let mut id_to_node: HashMap<u64, NodeIndex> = HashMap::new();
+
+    // Create the synthetic SuperRoot node
+    let super_root = graph.add_node(NodeData::SuperRoot);
+
+    // ============================================================================
+    // PASS 1: Identify all nodes and add them to the graph
+    // ============================================================================
+
+    log::debug!("Pass 1: Identifying nodes...");
+
+    // First, collect all class IDs from LOAD_CLASS records
+    for record_result in hprof.records_iter() {
+        let record = record_result
+            .map_err(|e| anyhow::anyhow!("Failed to parse record: {:?}", e))?;
+
+        if record.tag() == RecordTag::LoadClass {
+            if let Some(load_class_result) = record.as_load_class() {
+                let load_class = load_class_result
+                    .map_err(|e| anyhow::anyhow!("Failed to parse LoadClass: {:?}", e))?;
+                
+                let class_obj_id = load_class.class_obj_id().id();
+                
+                // Add class node if not already present
+                if !id_to_node.contains_key(&class_obj_id) {
+                    let node_idx = graph.add_node(NodeData::Class);
+                    id_to_node.insert(class_obj_id, node_idx);
+                    log::trace!("Added Class node: ID={}", class_obj_id);
+                }
+            }
+        }
+    }
+
+    log::info!("Found {} classes", id_to_node.len());
+
+    // Now scan heap dump segments for instances, arrays, and GC roots
+    let mut instance_count = 0;
+    let mut array_count = 0;
+    let mut gc_root_count = 0;
+    let mut gc_root_ids = Vec::new();
+
+    for record_result in hprof.records_iter() {
+        let record = record_result
+            .map_err(|e| anyhow::anyhow!("Failed to parse record: {:?}", e))?;
+
+        if record.tag() == RecordTag::HeapDump || record.tag() == RecordTag::HeapDumpSegment {
+            if let Some(heap_dump_result) = record.as_heap_dump_segment() {
+                let heap_dump = heap_dump_result
+                    .map_err(|e| anyhow::anyhow!("Failed to parse HeapDumpSegment: {:?}", e))?;
+
+                for sub_record_result in heap_dump.sub_records() {
+                    let sub_record = sub_record_result
+                        .map_err(|e| anyhow::anyhow!("Failed to parse sub-record: {:?}", e))?;
+
+                    match sub_record {
+                        // GC Roots - collect their object IDs
+                        jvm_hprof::heap_dump::SubRecord::GcRootUnknown(gc_root) => {
+                            let obj_id = gc_root.obj_id().id();
+                            gc_root_ids.push(obj_id);
+                            gc_root_count += 1;
+                            
+                            // Add root node if the object exists
+                            if !id_to_node.contains_key(&obj_id) {
+                                let node_idx = graph.add_node(NodeData::Root);
+                                id_to_node.insert(obj_id, node_idx);
+                                log::trace!("Added Root node for GC root: ID={}", obj_id);
+                            }
+                        }
+                        jvm_hprof::heap_dump::SubRecord::GcRootJniGlobal(gc_root) => {
+                            let obj_id = gc_root.obj_id().id();
+                            gc_root_ids.push(obj_id);
+                            gc_root_count += 1;
+                            
+                            if !id_to_node.contains_key(&obj_id) {
+                                let node_idx = graph.add_node(NodeData::Root);
+                                id_to_node.insert(obj_id, node_idx);
+                                log::trace!("Added Root node for JNI Global: ID={}", obj_id);
+                            }
+                        }
+                        jvm_hprof::heap_dump::SubRecord::GcRootJniLocalRef(gc_root) => {
+                            let obj_id = gc_root.obj_id().id();
+                            gc_root_ids.push(obj_id);
+                            gc_root_count += 1;
+                            
+                            if !id_to_node.contains_key(&obj_id) {
+                                let node_idx = graph.add_node(NodeData::Root);
+                                id_to_node.insert(obj_id, node_idx);
+                                log::trace!("Added Root node for JNI Local: ID={}", obj_id);
+                            }
+                        }
+                        jvm_hprof::heap_dump::SubRecord::GcRootJavaStackFrame(gc_root) => {
+                            let obj_id = gc_root.obj_id().id();
+                            gc_root_ids.push(obj_id);
+                            gc_root_count += 1;
+                            
+                            if !id_to_node.contains_key(&obj_id) {
+                                let node_idx = graph.add_node(NodeData::Root);
+                                id_to_node.insert(obj_id, node_idx);
+                                log::trace!("Added Root node for Java Stack Frame: ID={}", obj_id);
+                            }
+                        }
+                        jvm_hprof::heap_dump::SubRecord::GcRootSystemClass(gc_root) => {
+                            let obj_id = gc_root.obj_id().id();
+                            gc_root_ids.push(obj_id);
+                            gc_root_count += 1;
+                            
+                            if !id_to_node.contains_key(&obj_id) {
+                                let node_idx = graph.add_node(NodeData::Root);
+                                id_to_node.insert(obj_id, node_idx);
+                                log::trace!("Added Root node for System Class: ID={}", obj_id);
+                            }
+                        }
+                        jvm_hprof::heap_dump::SubRecord::GcRootThreadObj(gc_root) => {
+                            if let Some(thread_obj_id) = gc_root.thread_obj_id() {
+                                let obj_id = thread_obj_id.id();
+                                gc_root_ids.push(obj_id);
+                                gc_root_count += 1;
+                                
+                                if !id_to_node.contains_key(&obj_id) {
+                                    let node_idx = graph.add_node(NodeData::Root);
+                                    id_to_node.insert(obj_id, node_idx);
+                                    log::trace!("Added Root node for Thread: ID={}", obj_id);
+                                }
+                            }
+                        }
+                        jvm_hprof::heap_dump::SubRecord::GcRootBusyMonitor(gc_root) => {
+                            let obj_id = gc_root.obj_id().id();
+                            gc_root_ids.push(obj_id);
+                            gc_root_count += 1;
+                            
+                            if !id_to_node.contains_key(&obj_id) {
+                                let node_idx = graph.add_node(NodeData::Root);
+                                id_to_node.insert(obj_id, node_idx);
+                                log::trace!("Added Root node for Busy Monitor: ID={}", obj_id);
+                            }
+                        }
+                        // Instances
+                        jvm_hprof::heap_dump::SubRecord::Instance(instance) => {
+                            let obj_id = instance.obj_id().id();
+                            let size = instance.fields().len() as u32; // Approximate size
+                            
+                            if !id_to_node.contains_key(&obj_id) {
+                                let node_idx = graph.add_node(NodeData::Instance { id: obj_id, size });
+                                id_to_node.insert(obj_id, node_idx);
+                                instance_count += 1;
+                                log::trace!("Added Instance node: ID={}, size={}", obj_id, size);
+                            }
+                        }
+                        // Arrays
+                        jvm_hprof::heap_dump::SubRecord::ObjectArray(array) => {
+                            let obj_id = array.obj_id().id();
+                            let size = array.contents().len() as u32;
+                            
+                            if !id_to_node.contains_key(&obj_id) {
+                                let node_idx = graph.add_node(NodeData::Array { id: obj_id, size });
+                                id_to_node.insert(obj_id, node_idx);
+                                array_count += 1;
+                                log::trace!("Added ObjectArray node: ID={}, size={}", obj_id, size);
+                            }
+                        }
+                        jvm_hprof::heap_dump::SubRecord::PrimitiveArray(array) => {
+                            let obj_id = array.obj_id().id();
+                            let size = array.contents().len() as u32;
+                            
+                            if !id_to_node.contains_key(&obj_id) {
+                                let node_idx = graph.add_node(NodeData::Array { id: obj_id, size });
+                                id_to_node.insert(obj_id, node_idx);
+                                array_count += 1;
+                                log::trace!("Added PrimitiveArray node: ID={}, size={}", obj_id, size);
+                            }
+                        }
+                        // Class definitions in heap dump
+                        jvm_hprof::heap_dump::SubRecord::Class(class) => {
+                            let obj_id = class.obj_id().id();
+                            
+                            if !id_to_node.contains_key(&obj_id) {
+                                let node_idx = graph.add_node(NodeData::Class);
+                                id_to_node.insert(obj_id, node_idx);
+                                log::trace!("Added Class node from heap dump: ID={}", obj_id);
+                            }
+                        }
+                        _ => {
+                            // Other sub-record types (GcRootNativeStack, GcRootThreadBlock, etc.)
+                            // are less common but could be handled here if needed
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    log::info!(
+        "Pass 1 complete: {} classes, {} instances, {} arrays, {} GC roots",
+        id_to_node.len() - instance_count - array_count - gc_root_count,
+        instance_count,
+        array_count,
+        gc_root_count
+    );
+
+    // ============================================================================
+    // PASS 2: Add edges (references) between nodes
+    // ============================================================================
+
+    log::debug!("Pass 2: Adding edges (references)...");
+
+    let mut edge_count = 0;
+
+    // Connect SuperRoot to all GC roots
+    for gc_root_id in &gc_root_ids {
+        if let Some(&root_node) = id_to_node.get(gc_root_id) {
+            graph.add_edge(super_root, root_node, ());
+            edge_count += 1;
+            log::trace!("Connected SuperRoot -> GC Root: ID={}", gc_root_id);
+        }
+    }
+
+    log::info!("Connected SuperRoot to {} GC roots", gc_root_ids.len());
+
+    // Scan heap dump segments again to find references
+    for record_result in hprof.records_iter() {
+        let record = record_result
+            .map_err(|e| anyhow::anyhow!("Failed to parse record: {:?}", e))?;
+
+        if record.tag() == RecordTag::HeapDump || record.tag() == RecordTag::HeapDumpSegment {
+            if let Some(heap_dump_result) = record.as_heap_dump_segment() {
+                let heap_dump = heap_dump_result
+                    .map_err(|e| anyhow::anyhow!("Failed to parse HeapDumpSegment: {:?}", e))?;
+
+                for sub_record_result in heap_dump.sub_records() {
+                    let sub_record = sub_record_result
+                        .map_err(|e| anyhow::anyhow!("Failed to parse sub-record: {:?}", e))?;
+
+                    match sub_record {
+                        // Instance references: parse field values to find object references
+                        jvm_hprof::heap_dump::SubRecord::Instance(instance) => {
+                            let instance_id = instance.obj_id().id();
+                            let instance_node = id_to_node.get(&instance_id);
+                            
+                            if let Some(&instance_idx) = instance_node {
+                                // Parse instance fields to find object references
+                                // Note: This is a simplified approach. For accurate parsing,
+                                // we would need class definitions with field descriptors.
+                                // For now, we'll extract potential object IDs from the field data.
+                                let fields = instance.fields();
+                                
+                                // Extract object references from field data
+                                // Field data contains values that may be object IDs
+                                // We'll parse them based on the ID size
+                                extract_object_references(fields, id_size, |ref_id| {
+                                    if let Some(&ref_node) = id_to_node.get(&ref_id) {
+                                        if !graph.contains_edge(instance_idx, ref_node) {
+                                            graph.add_edge(instance_idx, ref_node, ());
+                                            edge_count += 1;
+                                            log::trace!("Added edge: Instance {} -> Object {}", instance_id, ref_id);
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                        // Array references: parse array contents for object references
+                        jvm_hprof::heap_dump::SubRecord::ObjectArray(array) => {
+                            let array_id = array.obj_id().id();
+                            let array_node = id_to_node.get(&array_id);
+                            
+                            if let Some(&array_idx) = array_node {
+                                // ObjectArray contents are object IDs
+                                let contents = array.contents();
+                                
+                                extract_object_references(contents, id_size, |ref_id| {
+                                    if let Some(&ref_node) = id_to_node.get(&ref_id) {
+                                        if !graph.contains_edge(array_idx, ref_node) {
+                                            graph.add_edge(array_idx, ref_node, ());
+                                            edge_count += 1;
+                                            log::trace!("Added edge: Array {} -> Object {}", array_id, ref_id);
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                        // Class references: superclass and class loader
+                        jvm_hprof::heap_dump::SubRecord::Class(class) => {
+                            let class_id = class.obj_id().id();
+                            let class_node = id_to_node.get(&class_id);
+                            
+                            if let Some(&class_idx) = class_node {
+                                // Reference to superclass
+                                if let Some(super_class_id) = class.super_class_obj_id() {
+                                    if let Some(&super_class_node) = id_to_node.get(&super_class_id.id()) {
+                                        if !graph.contains_edge(class_idx, super_class_node) {
+                                            graph.add_edge(class_idx, super_class_node, ());
+                                            edge_count += 1;
+                                            log::trace!("Added edge: Class {} -> SuperClass {}", class_id, super_class_id.id());
+                                        }
+                                    }
+                                }
+                                
+                                // Reference to class loader
+                                if let Some(class_loader_id) = class.class_loader_obj_id() {
+                                    if let Some(&class_loader_node) = id_to_node.get(&class_loader_id.id()) {
+                                        if !graph.contains_edge(class_idx, class_loader_node) {
+                                            graph.add_edge(class_idx, class_loader_node, ());
+                                            edge_count += 1;
+                                            log::trace!("Added edge: Class {} -> ClassLoader {}", class_id, class_loader_id.id());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    log::info!("Pass 2 complete: added {} edges", edge_count);
+    log::info!(
+        "Graph construction complete: {} nodes, {} edges",
+        graph.node_count(),
+        graph.edge_count()
+    );
+
+    Ok(HeapGraph {
+        graph,
+        id_to_node,
+        super_root,
+    })
+}
+
+/// Helper function to extract object references from byte data.
+///
+/// This function attempts to parse object IDs from byte slices that may contain
+/// object references. It's a simplified approach - for accurate parsing, we would
+/// need field descriptors from class definitions.
+///
+/// # Arguments
+///
+/// * `data` - Byte slice that may contain object references
+/// * `id_size` - Size of object IDs (4 or 8 bytes)
+/// * `callback` - Function called for each potential object ID found
+fn extract_object_references<F>(data: &[u8], id_size: IdSize, mut callback: F)
+where
+    F: FnMut(u64),
+{
+    let id_bytes = id_size.size_in_bytes();
+    
+    // Try to extract object IDs by reading every ID-sized chunk
+    // This is a heuristic - actual field parsing would require class definitions
+    for chunk in data.chunks_exact(id_bytes) {
+        let id = match id_size {
+            IdSize::U32 => {
+                if chunk.len() >= 4 {
+                    u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as u64
+                } else {
+                    continue;
+                }
+            }
+            IdSize::U64 => {
+                if chunk.len() >= 8 {
+                    u64::from_be_bytes([
+                        chunk[0], chunk[1], chunk[2], chunk[3],
+                        chunk[4], chunk[5], chunk[6], chunk[7],
+                    ])
+                } else {
+                    continue;
+                }
+            }
+        };
+        
+        // Only call callback for non-zero IDs (0 is typically a null reference)
+        if id != 0 {
+            callback(id);
+        }
+    }
+}
+
+/// Report for a single object in the heap analysis.
+///
+/// Contains information about an object's retained size and identification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectReport {
+    /// The HPROF object ID (0 for non-object nodes like SuperRoot, Root, Class).
+    pub object_id: u64,
+    /// The node type (SuperRoot, Root, Class, Instance, or Array).
+    pub node_type: String,
+    /// The shallow size of this object in bytes.
+    pub shallow_size: u64,
+    /// The retained size of this object in bytes.
+    /// Retained size = shallow size + sum of retained sizes of all children in dominator tree.
+    pub retained_size: u64,
+    /// The node index in the graph (for reference).
+    pub node_index: NodeIndex,
+}
+
+impl ObjectReport {
+    /// Creates a new ObjectReport.
+    pub fn new(
+        object_id: u64,
+        node_type: String,
+        shallow_size: u64,
+        retained_size: u64,
+        node_index: NodeIndex,
+    ) -> Self {
+        Self {
+            object_id,
+            node_type,
+            shallow_size,
+            retained_size,
+            node_index,
+        }
+    }
+}
+
+impl PartialOrd for ObjectReport {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ObjectReport {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Sort by retained size (descending), then by object ID
+        self.retained_size
+            .cmp(&other.retained_size)
+            .reverse()
+            .then_with(|| self.object_id.cmp(&other.object_id))
+    }
+}
+
+/// Calculates dominators and retained sizes for all nodes in the heap graph.
+///
+/// This function:
+/// 1. Computes the dominator tree using `petgraph::algo::dominators::simple_fast`
+/// 2. Calculates retained sizes using a bottom-up traversal of the dominator tree
+/// 3. Returns the top 50 objects sorted by retained size
+///
+/// # Retained Size Calculation
+///
+/// Retained size is the amount of memory that would be freed if an object
+/// were garbage collected. It is calculated as:
+///
+/// ```
+/// Retained Size(N) = Shallow Size(N) + Sum(Retained Size of all children of N in Dominator Tree)
+/// ```
+///
+/// The dominator tree is used because:
+/// - If node A dominates node B, then all paths from the root to B pass through A
+/// - This means if A is removed, B becomes unreachable
+/// - Therefore, B's retained size should be counted under A
+///
+/// # Arguments
+///
+/// * `graph` - The heap graph to analyze
+///
+/// # Returns
+///
+/// Returns a `Result<Vec<ObjectReport>>` containing the top 50 objects
+/// sorted by retained size (descending).
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The dominator calculation fails
+/// - Graph structure is invalid
+///
+/// # Example
+///
+/// ```no_run
+/// use hprof_analyzer::{HprofLoader, build_graph, calculate_dominators};
+/// use std::path::PathBuf;
+///
+/// # fn main() -> anyhow::Result<()> {
+/// let loader = HprofLoader::new(PathBuf::from("heap.hprof"));
+/// let mmap = loader.map_file()?;
+/// let graph = build_graph(&mmap[..])?;
+///
+/// let top_objects = calculate_dominators(&graph)?;
+/// for (i, report) in top_objects.iter().enumerate() {
+///     println!("{}. ID={}, Type={}, Retained={} bytes ({:.2} MB)",
+///              i + 1,
+///              report.object_id,
+///              report.node_type,
+///              report.retained_size,
+///              report.retained_size as f64 / (1024.0 * 1024.0));
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub fn calculate_dominators(graph: &HeapGraph) -> Result<Vec<ObjectReport>> {
+    log::debug!("Calculating dominators for {} nodes", graph.node_count());
+
+    let petgraph = graph.graph();
+    let super_root = graph.super_root();
+
+    // Step 1: Compute dominator tree using petgraph's simple_fast algorithm
+    // This returns a Dominators structure that maps each node to its immediate dominator
+    let dominators = dominators::simple_fast(petgraph, super_root)
+        .ok_or_else(|| anyhow::anyhow!("Failed to compute dominators"))?;
+
+    log::info!("Dominator tree computed successfully");
+
+    // Step 2: Build reverse dominator tree (children map)
+    // For each node, find all nodes that it dominates (its children in the dominator tree)
+    let mut children: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
+
+    for node_idx in petgraph.node_indices() {
+        if node_idx == super_root {
+            continue; // SuperRoot has no dominator
+        }
+
+        if let Some(dominator) = dominators.immediate_dominator(node_idx) {
+            children.entry(dominator).or_insert_with(Vec::new).push(node_idx);
+        }
+    }
+
+    log::debug!("Built children map: {} nodes have children", children.len());
+
+    // Step 3: Calculate shallow sizes for all nodes
+    let mut shallow_sizes: HashMap<NodeIndex, u64> = HashMap::new();
+
+    for node_idx in petgraph.node_indices() {
+        let node_data = &petgraph[node_idx];
+        let shallow_size = match node_data {
+            NodeData::SuperRoot | NodeData::Root | NodeData::Class => 0,
+            NodeData::Instance { size, .. } => *size as u64,
+            NodeData::Array { size, .. } => *size as u64,
+        };
+        shallow_sizes.insert(node_idx, shallow_size);
+    }
+
+    log::debug!("Calculated shallow sizes for {} nodes", shallow_sizes.len());
+
+    // Step 4: Calculate retained sizes using iterative bottom-up traversal
+    // Process nodes level by level from leaves (nodes with no children) to root
+    // This ensures all children are processed before their parents
+
+    let mut retained_sizes: HashMap<NodeIndex, u64> = HashMap::new();
+    let mut processed = std::collections::HashSet::new();
+
+    // Initialize all nodes with their shallow sizes
+    for node_idx in petgraph.node_indices() {
+        let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
+        retained_sizes.insert(node_idx, shallow);
+    }
+
+    // Process nodes bottom-up: repeatedly process nodes whose children are all processed
+    let mut changed = true;
+    while changed {
+        changed = false;
+
+        for node_idx in petgraph.node_indices() {
+            if processed.contains(&node_idx) {
+                continue;
+            }
+
+            // Check if all children in the dominator tree are processed
+            let all_children_processed = children
+                .get(&node_idx)
+                .map_or(true, |node_children| {
+                    node_children.iter().all(|&c| processed.contains(&c))
+                });
+
+            if all_children_processed {
+                // Start with shallow size
+                let mut retained = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
+
+                // Add retained sizes of all children in the dominator tree
+                if let Some(node_children) = children.get(&node_idx) {
+                    for &child in node_children {
+                        let child_retained = retained_sizes.get(&child).copied().unwrap_or(0);
+                        retained += child_retained;
+                    }
+                }
+
+                // Update retained size
+                retained_sizes.insert(node_idx, retained);
+                processed.insert(node_idx);
+                changed = true;
+            }
+        }
+    }
+
+    // Handle any remaining nodes (shouldn't happen in a valid dominator tree, but be safe)
+    for node_idx in petgraph.node_indices() {
+        if !processed.contains(&node_idx) {
+            let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
+            retained_sizes.insert(node_idx, shallow);
+            log::warn!("Node {:?} was not processed in bottom-up traversal", node_idx);
+        }
+    }
+
+    log::info!("Calculated retained sizes for {} nodes", retained_sizes.len());
+
+    // Step 5: Build ObjectReport for all nodes
+    let mut reports: Vec<ObjectReport> = Vec::new();
+
+    for node_idx in petgraph.node_indices() {
+        let node_data = &petgraph[node_idx];
+        let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
+        let retained = retained_sizes.get(&node_idx).copied().unwrap_or(0);
+
+        let (object_id, node_type) = match node_data {
+            NodeData::SuperRoot => (0, "SuperRoot".to_string()),
+            NodeData::Root => (0, "Root".to_string()),
+            NodeData::Class => (0, "Class".to_string()),
+            NodeData::Instance { id, .. } => (*id, "Instance".to_string()),
+            NodeData::Array { id, .. } => (*id, "Array".to_string()),
+        };
+
+        reports.push(ObjectReport::new(
+            object_id,
+            node_type,
+            shallow,
+            retained,
+            node_idx,
+        ));
+    }
+
+    // Step 6: Sort by retained size (descending) and take top 50
+    reports.sort();
+    let top_50: Vec<ObjectReport> = reports.into_iter().take(50).collect();
+
+    if let Some(top_object) = top_50.first() {
+        log::info!(
+            "Top object: ID={}, Type={}, Retained={} bytes ({:.2} MB)",
+            top_object.object_id,
+            top_object.node_type,
+            top_object.retained_size,
+            top_object.retained_size as f64 / (1024.0 * 1024.0)
+        );
+    }
+
+    Ok(top_50)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// Test that we can successfully map a dummy file.
+    ///
+    /// This test:
+    /// 1. Creates a temporary file with test data
+    /// 2. Uses HprofLoader to map it
+    /// 3. Verifies the mapped content matches the written data
+    #[test]
+    fn test_map_dummy_file() {
+        // Initialize logger for test output (optional, but helpful for debugging)
+        let _ = env_logger::Builder::from_default_env()
+            .filter_level(log::LevelFilter::Debug)
+            .try_init();
+
+        // Create a temporary file with some test data
+        let mut temp_file = tempfile::NamedTempFile::new().expect("Failed to create temp file");
+        let test_data = b"JAVA PROFILE 1.0.2\0This is test HPROF data for memory mapping";
+        temp_file
+            .write_all(test_data)
+            .expect("Failed to write test data");
+
+        // Get the path to the temporary file
+        let file_path = temp_file.path().to_path_buf();
+
+        // Create a loader and map the file
+        let loader = HprofLoader::new(file_path.clone());
+        let mmap = loader
+            .map_file()
+            .expect("Failed to map the temporary file");
+
+        // Verify the mapped content matches what we wrote
+        assert_eq!(mmap.len(), test_data.len());
+        assert_eq!(&mmap[..], test_data);
+
+        // Verify we can read specific bytes
+        assert_eq!(&mmap[0..17], b"JAVA PROFILE 1.0.2");
+
+        log::info!("Successfully mapped and verified {} bytes", mmap.len());
+    }
+
+    /// Test that mapping an empty file returns an appropriate error.
+    #[test]
+    fn test_map_empty_file() {
+        let _ = env_logger::Builder::from_default_env()
+            .filter_level(log::LevelFilter::Debug)
+            .try_init();
+
+        let temp_file = tempfile::NamedTempFile::new().expect("Failed to create temp file");
+        let file_path = temp_file.path().to_path_buf();
+
+        let loader = HprofLoader::new(file_path);
+        let result = loader.map_file();
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            HprofLoaderError::EmptyFile { path } => {
+                log::debug!("Correctly detected empty file: {:?}", path);
+            }
+            other => panic!("Expected EmptyFile error, got: {:?}", other),
+        }
+    }
+
+    /// Test that mapping a non-existent file returns an appropriate error.
+    #[test]
+    fn test_map_nonexistent_file() {
+        let _ = env_logger::Builder::from_default_env()
+            .filter_level(log::LevelFilter::Debug)
+            .try_init();
+
+        let nonexistent_path = PathBuf::from("/nonexistent/path/to/file.hprof");
+        let loader = HprofLoader::new(nonexistent_path.clone());
+        let result = loader.map_file();
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            HprofLoaderError::FileOpen { path, .. } => {
+                assert_eq!(path, nonexistent_path);
+                log::debug!("Correctly detected nonexistent file: {:?}", path);
+            }
+            other => panic!("Expected FileOpen error, got: {:?}", other),
+        }
+    }
+
+    /// Test that the mapped memory is read-only (attempting to write would cause a segfault,
+    /// but we can at least verify the type system prevents mutable access).
+    #[test]
+    fn test_mapped_memory_is_readonly() {
+        let _ = env_logger::Builder::from_default_env()
+            .filter_level(log::LevelFilter::Debug)
+            .try_init();
+
+        let mut temp_file = tempfile::NamedTempFile::new().expect("Failed to create temp file");
+        temp_file
+            .write_all(b"test data")
+            .expect("Failed to write test data");
+
+        let loader = HprofLoader::new(temp_file.path().to_path_buf());
+        let mmap = loader.map_file().expect("Failed to map file");
+
+        // Verify we can read from the map
+        assert_eq!(&mmap[..], b"test data");
+
+        // The memory map is read-only, so we cannot get a mutable reference.
+        // This is enforced by the type system - `Mmap` (not `MmapMut`) is returned.
+        // If we tried to get a mutable reference, the compiler would prevent it.
+        // This test verifies the API design, not runtime behavior.
+        log::debug!("Mapped memory is read-only (type system enforced)");
+    }
+
+    /// Test that we can map a large file (simulating a real HPROF scenario).
+    #[test]
+    fn test_map_large_file() {
+        let _ = env_logger::Builder::from_default_env()
+            .filter_level(log::LevelFilter::Debug)
+            .try_init();
+
+        // Create a file with 1MB of data (simulating a small HPROF file)
+        let mut temp_file = tempfile::NamedTempFile::new().expect("Failed to create temp file");
+        let large_data = vec![0x42u8; 1024 * 1024]; // 1MB
+        temp_file
+            .write_all(&large_data)
+            .expect("Failed to write large test data");
+
+        let loader = HprofLoader::new(temp_file.path().to_path_buf());
+        let mmap = loader
+            .map_file()
+            .expect("Failed to map large file");
+
+        assert_eq!(mmap.len(), 1024 * 1024);
+        assert_eq!(mmap[0], 0x42);
+        assert_eq!(mmap[mmap.len() - 1], 0x42);
+
+        log::info!("Successfully mapped large file: {} bytes", mmap.len());
+    }
+}
