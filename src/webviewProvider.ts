@@ -286,24 +286,34 @@ export class HeapAnalysisWebviewProvider {
                 
                 // Convert data to nodes, filtering out invalid entries
                 const nodes = data
-                    .filter(d => d && (d.retained_size > 0 || d.node_type === 'SuperRoot'))
-                    .map(d => ({
-                        name: d.object_id === 0 
-                            ? d.node_type 
-                            : \`\${d.node_type} #\${d.object_id.toString().slice(-8)}\`,
-                        value: Math.max(d.retained_size || 0, 1), // Ensure at least 1 for visibility
-                        objectId: d.object_id,
-                        nodeType: d.node_type,
-                        shallowSize: d.shallow_size || 0,
-                        retainedSize: d.retained_size || 0,
-                        children: [] // Will be populated on drill-down
-                    }));
+                    .filter(d => d && d.retained_size > 0 && d.node_type !== 'Class')
+                    .map(d => {
+                        // Create a more meaningful name
+                        let name;
+                        if (d.object_id === 0) {
+                            name = d.node_type;
+                        } else {
+                            const shortId = d.object_id.toString().slice(-8);
+                            const sizeMB = (d.retained_size / (1024 * 1024)).toFixed(2);
+                            name = \`\${d.node_type} (\${sizeMB} MB)\`;
+                        }
+                        
+                        return {
+                            name: name,
+                            value: d.retained_size,
+                            objectId: d.object_id,
+                            nodeType: d.node_type,
+                            shallowSize: d.shallow_size || 0,
+                            retainedSize: d.retained_size || 0,
+                            children: [] // Will be populated on drill-down
+                        };
+                    });
                 
                 // Sort by retained size (descending)
                 nodes.sort((a, b) => b.value - a.value);
                 
-                // Limit to top 20 nodes for initial display to avoid overcrowding
-                const topNodes = nodes.slice(0, 20);
+                // Use all nodes (already filtered and sorted)
+                const topNodes = nodes;
                 
                 root.children = topNodes;
                 root.value = d3.sum(topNodes, d => d.value);
@@ -357,8 +367,9 @@ export class HeapAnalysisWebviewProvider {
                     
                     console.log('[SunburstChart] Partition computed, descendants:', rootHierarchy.descendants().length);
                     
-                    // Clear previous arcs
+                    // Clear previous arcs and labels
                     this.g.selectAll('path').remove();
+                    this.g.selectAll('text').remove();
                     
                     // Draw arcs
                     const paths = this.g.selectAll('path')
@@ -366,14 +377,14 @@ export class HeapAnalysisWebviewProvider {
                         .enter()
                         .append('path')
                         .attr('d', arc)
-                    .style('fill', d => {
-                        while (d.depth > 1) d = d.parent;
-                        return this.color(d.data.name);
-                    })
-                    .style('stroke', '#fff')
-                    .style('stroke-width', '1px')
-                    .style('opacity', 0.9)
-                    .style('cursor', 'pointer')
+                        .style('fill', d => {
+                            while (d.depth > 1) d = d.parent;
+                            return this.color(d.data.name);
+                        })
+                        .style('stroke', '#fff')
+                        .style('stroke-width', '1px')
+                        .style('opacity', 0.9)
+                        .style('cursor', 'pointer')
                         .on('mouseover', (event, d) => {
                             this.tooltip
                                 .html(\`

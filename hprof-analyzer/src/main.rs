@@ -298,8 +298,13 @@ fn analyze_heap_blocking(
         Ok((top_objects, analysis_state)) => {
             log::info!("Heap analysis completed successfully (request_id: {})", request_id);
             
-            // Get top 2 layers for initial visualization
-            let top_layers = analysis_state.get_top_layers(2, 50);
+            // Get top objects for initial visualization (filtered to meaningful objects)
+            // Use top_objects directly, but limit to top 20 for better visualization
+            let top_layers: Vec<_> = top_objects.iter()
+                .filter(|obj| obj.retained_size > 0 && obj.node_type != "Class")
+                .take(20)
+                .cloned()
+                .collect();
             
             AnalyzeHeapResult {
                 request_id,

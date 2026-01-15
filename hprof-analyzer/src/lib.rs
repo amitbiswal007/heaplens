@@ -1408,6 +1408,22 @@ impl AnalysisState {
             let shallow = self.shallow_sizes.get(&node_idx).copied().unwrap_or(0);
             let retained = self.retained_sizes.get(&node_idx).copied().unwrap_or(0);
 
+            // Filter out Class nodes and nodes with zero retained size (except SuperRoot)
+            if node_type == "Class" || (retained == 0 && node_type != "SuperRoot") {
+                // Still process children, but skip this node
+                if depth + 1 < max_depth {
+                    if let Some(children) = self.children_map.get(&node_idx) {
+                        for &child_idx in children {
+                            if !visited.contains(&child_idx) && result.len() < max_nodes {
+                                visited.insert(child_idx);
+                                queue.push_back((child_idx, depth + 1));
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
             result.push(ObjectReport::new(
                 object_id,
                 node_type,
