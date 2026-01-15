@@ -1363,6 +1363,11 @@ impl AnalysisState {
             let shallow = self.shallow_sizes.get(&child_idx).copied().unwrap_or(0);
             let retained = self.retained_sizes.get(&child_idx).copied().unwrap_or(0);
 
+            // Filter out Class nodes and zero-size nodes
+            if node_type == "Class" || retained == 0 {
+                continue;
+            }
+
             children_reports.push(ObjectReport::new(
                 child_object_id,
                 node_type,
@@ -1370,6 +1375,11 @@ impl AnalysisState {
                 retained,
                 child_idx,
             ));
+        }
+
+        // If no meaningful children found, return None
+        if children_reports.is_empty() {
+            return None;
         }
 
         // Sort by retained size (descending)

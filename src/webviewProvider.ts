@@ -66,17 +66,37 @@ export class HeapAnalysisWebviewProvider {
                                 path: hprofPath,
                                 object_id: message.objectId
                             });
-                            panel.webview.postMessage({
-                                command: 'childrenResponse',
-                                objectId: message.objectId,
-                                children: children
-                            });
+                            
+                            // Check if children is an array and has items
+                            if (Array.isArray(children) && children.length > 0) {
+                                panel.webview.postMessage({
+                                    command: 'childrenResponse',
+                                    objectId: message.objectId,
+                                    children: children
+                                });
+                            } else {
+                                // No children found - show a message instead of error
+                                panel.webview.postMessage({
+                                    command: 'noChildren',
+                                    objectId: message.objectId,
+                                    message: 'This object has no children in the dominator tree'
+                                });
+                            }
                         } catch (error: any) {
                             console.error(`[WebviewProvider] Error getting children:`, error);
-                            panel.webview.postMessage({
-                                command: 'error',
-                                message: error.message || String(error)
-                            });
+                            // Check if it's a "not found" error
+                            if (error.message && error.message.includes('not found')) {
+                                panel.webview.postMessage({
+                                    command: 'noChildren',
+                                    objectId: message.objectId,
+                                    message: 'This object has no children or was not found'
+                                });
+                            } else {
+                                panel.webview.postMessage({
+                                    command: 'error',
+                                    message: error.message || String(error)
+                                });
+                            }
                         }
                         break;
                     case 'alert':
@@ -202,10 +222,36 @@ export class HeapAnalysisWebviewProvider {
         .tooltip.visible {
             opacity: 1;
         }
+        .controls {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            z-index: 1000;
+        }
+        .btn {
+            padding: 8px 16px;
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            margin-right: 8px;
+        }
+        .btn:hover {
+            background: var(--vscode-button-hoverBackground);
+        }
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
     </style>
 </head>
 <body>
     <div id="debug">Webview loaded. Waiting for data...</div>
+    <div class="controls">
+        <button id="reset-btn" class="btn" style="display: none;">← Back to Root</button>
+    </div>
     <div id="chart-container">
         <div id="sunburst"></div>
         <div class="tooltip" id="tooltip"></div>
@@ -237,6 +283,7 @@ export class HeapAnalysisWebviewProvider {
                 this.height = 800;
                 this.radius = Math.min(this.width, this.height) / 2;
                 this.data = null;
+                this.originalData = null; // Store original data for reset
                 this.currentRoot = null;
                 
                 // Clear container first
@@ -345,6 +392,10 @@ export class HeapAnalysisWebviewProvider {
                     }
                     
                     this.data = data;
+                    // Store original data if this is the root view
+                    if (rootNode === null) {
+                        this.originalData = data;
+                    }
                     this.currentRoot = rootNode;
                     
                     const root = this.buildHierarchy(data, rootNode);
@@ -433,8 +484,14 @@ export class HeapAnalysisWebviewProvider {
             
             // Reset to root view
             reset() {
-                if (this.data) {
-                    this.update(this.data, null);
+                if (this.originalData) {
+                    this.currentRoot = null;
+                    this.update(this.originalData, null);
+                    // Hide reset button
+                    const resetBtn = document.getElementById('reset-btn');
+                    if (resetBtn) {
+                        resetBtn.style.display = 'none';
+                    }
                 }
             }
             
@@ -542,8 +599,13 @@ export class HeapAnalysisWebviewProvider {
                     console.log('[Webview] Updating chart with', message.data.length, 'items');
                     updateDebug(\`Updating chart with \${message.data.length} items\`);
                     try {
-                        chart.update(message.data);
+                        chart.update(message.data, null); // null means root view
                         updateDebug('Chart updated successfully');
+                        // Hide reset button for root view
+                        const resetBtn = document.getElementById('reset-btn');
+                        if (resetBtn) {
+                            resetBtn.style.display = 'none';
+                        }
                     } catch (error) {
                         console.error('[Webview] Error updating chart:', error);
                         updateDebug(\`ERROR: \${error.message}\`);
@@ -558,8 +620,32 @@ export class HeapAnalysisWebviewProvider {
                     console.log('[Webview] Received children for object', message.objectId);
                     try {
                         chart.drillDown(message.children, message.objectId);
+                        // Show reset button when drilling down
+                        const resetBtn = document.getElementById('reset-btn');
+                        if (resetBtn) {
+                            resetBtn.style.display = 'block';
+                        }
                     } catch (error) {
                         console.error('[Webview] Error drilling down:', error);
+                        updateDebug(\`ERROR drilling down: \${error.message}\`);
+                    }
+                    break;
+                case 'noChildren':
+                    console.log('[Webview] No children for object', message.objectId);
+                    updateDebug(\`No children: \${message.message}\`);
+                    // Show a temporary message
+                    const sunburstEl = document.getElementById('sunburst');
+                    if (sunburstEl) {
+                        const msgEl = document.createElement('div');
+                        msgEl.className = 'loading';
+                        msgEl.textContent = message.message || 'This object has no children';
+                        msgEl.style.position = 'absolute';
+                        msgEl.style.top = '50%';
+                        msgEl.style.left = '50%';
+                        msgEl.style.transform = 'translate(-50%, -50%)';
+                        msgEl.style.zIndex = '1000';
+                        sunburstEl.appendChild(msgEl);
+                        setTimeout(() => msgEl.remove(), 3000);
                     }
                     break;
                 case 'error':
@@ -572,12 +658,23 @@ export class HeapAnalysisWebviewProvider {
         // Show loading state initially
         const sunburstEl = document.getElementById('sunburst');
         const debugEl = document.getElementById('debug');
+        const resetBtn = document.getElementById('reset-btn');
         
         function updateDebug(msg) {
             if (debugEl) {
                 debugEl.textContent = \`[DEBUG] \${msg}\`;
                 console.log('[Webview]', msg);
             }
+        }
+        
+        // Handle reset button click
+        if (resetBtn) {
+            resetBtn.addEventListener('click', () => {
+                if (chart) {
+                    console.log('[Webview] Reset button clicked');
+                    chart.reset();
+                }
+            });
         }
         
         if (sunburstEl) {
