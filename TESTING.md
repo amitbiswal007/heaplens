@@ -96,9 +96,22 @@ cp hprof-analyzer/target/release/hprof-server bin/
 ### Method 1: Extension Development Host (Recommended)
 
 1. **Open the project in VS Code**
+   
+   **Option A: If `code` command is available:**
    ```bash
    code .
    ```
+   
+   **Option B: If `code` command is not found, install VS Code command line tools:**
+   - Open VS Code
+   - Press `Cmd+Shift+P` (Command Palette)
+   - Type "Shell Command: Install 'code' command in PATH"
+   - Select it and restart your terminal
+   
+   **Option C: Open VS Code manually:**
+   - Open VS Code application
+   - File → Open Folder
+   - Navigate to the project directory: `/Users/sachingupta/Documents/Learning/Cursor/sachinkg12/HeapScope/HeapScope`
 
 2. **Press F5** (or Run → Start Debugging)
    - This opens a new "Extension Development Host" window

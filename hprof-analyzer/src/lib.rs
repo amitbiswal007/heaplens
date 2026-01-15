@@ -5,16 +5,14 @@
 //! This crate provides a safe interface around memory-mapped file I/O for efficient
 //! parsing of large HPROF files without loading them entirely into RAM.
 
-use anyhow::{Context, Result};
-use jvm_hprof::{parse_hprof, RecordTag, Id, IdSize};
+use anyhow::Result;
+use jvm_hprof::{parse_hprof, RecordTag, IdSize};
 use memmap2::{Mmap, MmapOptions};
 use petgraph::{Graph, Directed, graph::NodeIndex};
 use petgraph::algo::dominators;
-use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
 use thiserror::Error;
 
 /// Errors that can occur during HPROF file loading and mapping.
@@ -241,17 +239,18 @@ impl HprofLoader {
         // The `unsafe` marker exists because memory mapping provides raw access to
         // OS-managed memory pages, bypassing Rust's normal safety guarantees. However,
         // our specific usage pattern (read-only mapping of an immutable file) is safe.
-        let mmap = unsafe {
+        let mmap_result = unsafe {
             MmapOptions::new()
                 .map(&file)
-                .map_err(|source| {
-                    log::error!("Failed to create memory map: {:?}", self.path);
-                    HprofLoaderError::MapCreation {
-                        path: self.path.clone(),
-                        source,
-                    })
-                })?
         };
+        
+        let mmap = mmap_result.map_err(|source| {
+            log::error!("Failed to create memory map: {:?}", self.path);
+            HprofLoaderError::MapCreation {
+                path: self.path.clone(),
+                source,
+            }
+        })?;
 
         log::info!(
             "Successfully mapped HPROF file: {:?} ({} bytes)",
@@ -782,7 +781,26 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
                         // Arrays
                         jvm_hprof::heap_dump::SubRecord::ObjectArray(array) => {
                             let obj_id = array.obj_id().id();
-                            let size = array.contents().len() as u32;
+                            // Calculate approximate size from array elements
+                            // ObjectArray stores object IDs, so we estimate size based on element count
+                            // Since element_count() is not available, we use elements() to count
+                            let id_size_bytes = match id_size {
+                                IdSize::U32 => 4,
+                                IdSize::U64 => 8,
+                            };
+                            // Count elements by iterating (this is approximate)
+                            let mut element_count = 0;
+                            for element_result in array.elements(id_size) {
+                                match element_result {
+                                    Ok(Some(_)) | Ok(None) => {
+                                        element_count += 1;
+                                    }
+                                    Err(_) => {
+                                        // Parse error, skip
+                                    }
+                                }
+                            }
+                            let size = (element_count * id_size_bytes) as u32;
                             
                             if !id_to_node.contains_key(&obj_id) {
                                 let node_idx = graph.add_node(NodeData::Array { id: obj_id, size });
@@ -793,13 +811,17 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
                         }
                         jvm_hprof::heap_dump::SubRecord::PrimitiveArray(array) => {
                             let obj_id = array.obj_id().id();
-                            let size = array.contents().len() as u32;
+                            // For PrimitiveArray, we can't easily get element count or type from the API
+                            // Use a default/approximate size - we'll use the raw data length if available
+                            // This is a simplified approach - in production, you'd want more accurate sizing
+                            // For now, use a placeholder size (will be refined when we have better API access)
+                            let size = 0u32; // Placeholder - actual size calculation requires API methods not available
                             
                             if !id_to_node.contains_key(&obj_id) {
                                 let node_idx = graph.add_node(NodeData::Array { id: obj_id, size });
                                 id_to_node.insert(obj_id, node_idx);
                                 array_count += 1;
-                                log::trace!("Added PrimitiveArray node: ID={}, size={}", obj_id, size);
+                                log::trace!("Added PrimitiveArray node: ID={}, size={} (approximate)", obj_id, size);
                             }
                         }
                         // Class definitions in heap dump
@@ -897,17 +919,31 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
                             
                             if let Some(&array_idx) = array_node {
                                 // ObjectArray contents are object IDs
-                                let contents = array.contents();
-                                
-                                extract_object_references(contents, id_size, |ref_id| {
-                                    if let Some(&ref_node) = id_to_node.get(&ref_id) {
-                                        if !graph.contains_edge(array_idx, ref_node) {
-                                            graph.add_edge(array_idx, ref_node, ());
-                                            edge_count += 1;
-                                            log::trace!("Added edge: Array {} -> Object {}", array_id, ref_id);
+                                // Extract references using the elements() iterator
+                                let mut ref_count = 0;
+                                for element_result in array.elements(id_size) {
+                                    match element_result {
+                                        Ok(Some(element_id)) => {
+                                            let ref_id = element_id.id();
+                                            if let Some(&ref_node) = id_to_node.get(&ref_id) {
+                                                if !graph.contains_edge(array_idx, ref_node) {
+                                                    graph.add_edge(array_idx, ref_node, ());
+                                                    edge_count += 1;
+                                                    log::trace!("Added edge: Array {} -> Object {}", array_id, ref_id);
+                                                }
+                                            }
+                                            ref_count += 1;
+                                        }
+                                        Ok(None) => {
+                                            // Null reference, skip
+                                        }
+                                        Err(_) => {
+                                            // Parse error, skip this element
+                                            log::trace!("Failed to parse element in ObjectArray {}", array_id);
                                         }
                                     }
-                                });
+                                }
+                                log::trace!("ObjectArray {} has {} elements", array_id, ref_count);
                             }
                         }
                         // Class references: superclass and class loader
@@ -975,7 +1011,10 @@ fn extract_object_references<F>(data: &[u8], id_size: IdSize, mut callback: F)
 where
     F: FnMut(u64),
 {
-    let id_bytes = id_size.size_in_bytes();
+    let id_bytes = match id_size {
+        IdSize::U32 => 4,
+        IdSize::U64 => 8,
+    };
     
     // Try to extract object IDs by reading every ID-sized chunk
     // This is a heuristic - actual field parsing would require class definitions
@@ -1128,8 +1167,7 @@ pub fn calculate_dominators(graph: &HeapGraph) -> Result<Vec<ObjectReport>> {
 
     // Step 1: Compute dominator tree using petgraph's simple_fast algorithm
     // This returns a Dominators structure that maps each node to its immediate dominator
-    let dominators = dominators::simple_fast(petgraph, super_root)
-        .ok_or_else(|| anyhow::anyhow!("Failed to compute dominators"))?;
+    let dominators = dominators::simple_fast(petgraph, super_root);
 
     log::info!("Dominator tree computed successfully");
 
@@ -1308,7 +1346,7 @@ impl AnalysisState {
             self.super_root
         } else {
             // Look up by object ID
-            *self.id_to_node.get(&object_id)??
+            *self.id_to_node.get(&object_id)?
         };
 
         // Get children from the dominator tree
@@ -1408,8 +1446,7 @@ pub fn calculate_dominators_with_state(graph: &HeapGraph) -> Result<(Vec<ObjectR
     let super_root = graph.super_root();
 
     // Step 1: Compute dominator tree
-    let dominators = dominators::simple_fast(petgraph, super_root)
-        .ok_or_else(|| anyhow::anyhow!("Failed to compute dominators"))?;
+    let dominators = dominators::simple_fast(petgraph, super_root);
 
     log::info!("Dominator tree computed successfully");
 

@@ -180,6 +180,9 @@ export function activate(context: vscode.ExtensionContext) {
         if (!rustClient || rustClient.isDisposed) {
             try {
                 rustClient = new RustClient(serverPath);
+                rustClient.onStderr = (message: string) => {
+                    outputChannel?.appendLine(`[Rust stderr] ${message.trim()}`);
+                };
                 outputChannel.appendLine('Connected to Rust analysis server');
             } catch (error: any) {
                 const errorMsg = `Failed to start Rust server: ${error.message}`;
@@ -195,6 +198,8 @@ export function activate(context: vscode.ExtensionContext) {
         let analysisError: Error | null = null;
 
         rustClient.onNotification('heap_analysis_complete', (params: any) => {
+            outputChannel?.appendLine(`[DEBUG] Received heap_analysis_complete notification`);
+            outputChannel?.appendLine(`[DEBUG] Status: ${params.status}`);
             analysisComplete = true;
             if (params.status === 'completed') {
                 analysisResult = params.top_objects || [];
@@ -202,6 +207,7 @@ export function activate(context: vscode.ExtensionContext) {
                 
                 outputChannel?.appendLine('Analysis completed successfully!');
                 outputChannel?.appendLine(`Found ${analysisResult.length} top objects by retained size`);
+                outputChannel?.appendLine(`Top layers for visualization: ${topLayers.length} items`);
                 outputChannel?.appendLine('');
                 outputChannel?.appendLine('Top Objects:');
                 outputChannel?.appendLine(JSON.stringify(analysisResult, null, 2));
@@ -209,11 +215,20 @@ export function activate(context: vscode.ExtensionContext) {
                 // Create and show webview with Sunburst chart
                 if (rustClient) {
                     HeapAnalysisWebviewProvider.createOrShow(extensionUri, rustClient, hprofPath);
-                }
-                
-                // Update webview with initial data (top 2 layers)
-                if (topLayers.length > 0) {
-                    HeapAnalysisWebviewProvider.updateWithData(topLayers);
+                    
+                    // Wait a bit for webview to initialize, then send data
+                    setTimeout(() => {
+                        if (topLayers.length > 0) {
+                            outputChannel?.appendLine(`[DEBUG] Sending ${topLayers.length} items to webview`);
+                            HeapAnalysisWebviewProvider.updateWithData(topLayers);
+                        } else {
+                            outputChannel?.appendLine('[WARNING] top_layers is empty, using top_objects instead');
+                            // Fallback: use top_objects if top_layers is empty
+                            if (analysisResult.length > 0) {
+                                HeapAnalysisWebviewProvider.updateWithData(analysisResult.slice(0, 50));
+                            }
+                        }
+                    }, 500);
                 }
                 
                 vscode.window.showInformationMessage(
@@ -275,12 +290,14 @@ export function activate(context: vscode.ExtensionContext) {
                     outputChannel?.appendLine(`[ERROR] ${errorMessage}`);
                     vscode.window.showErrorMessage(`HPROF analysis failed: ${errorMessage}`);
                     throw error;
+                } finally {
+                    // Clean up notification handler after completion or error
+                    if (rustClient) {
+                        rustClient.offNotification('heap_analysis_complete');
+                    }
                 }
             }
         );
-
-        // Clean up notification handler
-        rustClient.offNotification('heap_analysis_complete');
     });
 
     context.subscriptions.push(disposable);

@@ -7,10 +7,11 @@ use anyhow::{Context, Result};
 use hprof_analyzer::{build_graph, calculate_dominators_with_state, HprofLoader};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::signal;
 use tokio::sync::mpsc;
 use tokio::task;
@@ -78,7 +79,7 @@ struct FileAnalysisState {
 /// Server state and configuration.
 struct Server {
     /// Counter for generating unique request IDs.
-    request_id_counter: AtomicU64,
+    request_id_counter: Arc<AtomicU64>,
     /// Channel sender for sending analysis results.
     result_tx: mpsc::UnboundedSender<AnalyzeHeapResult>,
     /// Channel receiver for analysis results.
@@ -92,7 +93,7 @@ impl Server {
     fn new() -> Self {
         let (result_tx, result_rx) = mpsc::unbounded_channel();
         Self {
-            request_id_counter: AtomicU64::new(1),
+            request_id_counter: Arc::new(AtomicU64::new(1)),
             result_tx,
             result_rx,
             analysis_states: Arc::new(RwLock::new(HashMap::new())),
@@ -328,24 +329,33 @@ fn analyze_heap_internal(
     analysis_states: Arc<RwLock<HashMap<PathBuf, FileAnalysisState>>>,
 ) -> Result<(Vec<hprof_analyzer::ObjectReport>, hprof_analyzer::AnalysisState)> {
     // Step 1: Load and map the HPROF file
+    eprintln!("[Progress] Step 1/3: Loading HPROF file...");
     let loader = HprofLoader::new(path.clone());
     let mmap = loader.map_file()
         .with_context(|| format!("Failed to load HPROF file: {:?}", path))?;
 
-    log::debug!("HPROF file mapped: {} bytes", mmap.len());
+    let file_size_mb = mmap.len() as f64 / (1024.0 * 1024.0);
+    eprintln!("[Progress] HPROF file mapped: {:.2} MB", file_size_mb);
+    log::info!("HPROF file mapped: {} bytes ({:.2} MB)", mmap.len(), file_size_mb);
 
     // Step 2: Build the heap graph
+    eprintln!("[Progress] Step 2/3: Building heap graph (this may take a while for large files)...");
     let graph = build_graph(&mmap[..])
         .context("Failed to build heap graph")?;
 
-    log::debug!("Heap graph built: {} nodes, {} edges", 
+    eprintln!("[Progress] Heap graph built: {} nodes, {} edges", 
+                graph.node_count(), 
+                graph.edge_count());
+    log::info!("Heap graph built: {} nodes, {} edges", 
                 graph.node_count(), 
                 graph.edge_count());
 
     // Step 3: Calculate dominators and retained sizes with state
+    eprintln!("[Progress] Step 3/3: Calculating dominators and retained sizes...");
     let (top_objects, analysis_state) = calculate_dominators_with_state(&graph)
         .context("Failed to calculate dominators")?;
 
+    eprintln!("[Progress] Analysis complete: {} top objects", top_objects.len());
     log::info!("Analysis complete: {} top objects", top_objects.len());
 
     // Step 4: Store analysis state for lazy loading queries
@@ -354,14 +364,14 @@ fn analyze_heap_internal(
             .map_err(|e| anyhow::anyhow!("Failed to write analysis states: {}", e))?;
         
         states.insert(path.clone(), FileAnalysisState {
-            state: Arc::new(RwLock::new(Some(analysis_state))),
+            state: Arc::new(RwLock::new(Some(analysis_state.clone()))),
             path: path.clone(),
         });
     }
 
     log::debug!("Stored analysis state for: {:?}", path);
 
-    Ok(top_objects)
+    Ok((top_objects, analysis_state))
 }
 
 #[tokio::main]
@@ -375,14 +385,10 @@ async fn main() -> Result<()> {
 
     // Create server instance
     let server = Server::new();
-    let result_tx = server.result_tx.clone();
     let mut result_rx = server.result_rx;
 
     // Spawn task to process results and send notifications
     let notification_handle = task::spawn(async move {
-        let stdout = io::stdout();
-        let mut stdout_lock = stdout.lock();
-        
         while let Some(result) = result_rx.recv().await {
             let notification = JsonRpcNotification {
                 jsonrpc: "2.0".to_string(),
@@ -404,64 +410,50 @@ async fn main() -> Result<()> {
                 }
             };
 
-            if let Err(e) = writeln!(stdout_lock, "{}", json) {
-                eprintln!("Failed to write notification: {}", e);
-                break;
-            }
-
-            if let Err(e) = stdout_lock.flush() {
-                eprintln!("Failed to flush stdout: {}", e);
-                break;
-            }
-        }
-    });
-
-    // Spawn task to handle stdin reading and request processing
-    let stdin_handle = task::spawn_blocking(move || {
-        let stdin = io::stdin();
-        let reader = BufReader::new(stdin.lock());
-        let mut lines = Vec::new();
-
-        for line_result in reader.lines() {
-            let line = match line_result {
-                Ok(line) => line,
-                Err(e) => {
-                    eprintln!("Failed to read line from stdin: {}", e);
+            // Lock stdout only for the write operation, not across await
+            {
+                let stdout = io::stdout();
+                let mut stdout_lock = stdout.lock();
+                if let Err(e) = writeln!(stdout_lock, "{}", json) {
+                    eprintln!("Failed to write notification: {}", e);
                     break;
                 }
-            };
-
-            if !line.is_empty() {
-                lines.push(line);
+                if let Err(e) = stdout_lock.flush() {
+                    eprintln!("Failed to flush stdout: {}", e);
+                    break;
+                }
             }
         }
-
-        lines
     });
 
-    // Handle stdin reading and process requests
+    // Handle stdin reading and process requests line-by-line (async)
     let request_handle = {
         let result_tx = server.result_tx.clone();
         let request_id_counter = server.request_id_counter.clone();
+        let analysis_states = server.analysis_states.clone();
         task::spawn(async move {
-            let stdin_result = stdin_handle.await;
-            let lines = match stdin_result {
-                Ok(lines) => lines,
-                Err(e) => {
-                    eprintln!("Error reading from stdin: {}", e);
-                    return;
+            let stdin = tokio::io::stdin();
+            let reader = BufReader::new(stdin);
+            let mut lines = reader.lines();
+
+            // Process each line as it arrives (non-blocking)
+            while let Some(line_result) = lines.next_line().await.transpose() {
+                let line = match line_result {
+                    Ok(line) => line,
+                    Err(e) => {
+                        eprintln!("Failed to read line from stdin: {}", e);
+                        break;
+                    }
+                };
+
+                if line.trim().is_empty() {
+                    continue;
                 }
-            };
 
-            let stdout = io::stdout();
-            let mut stdout_lock = stdout.lock();
-
-            // Process each line as a JSON-RPC request
-            for line in lines {
                 let request: JsonRpcRequest = match serde_json::from_str(&line) {
                     Ok(req) => req,
                     Err(e) => {
-                        eprintln!("Failed to parse JSON-RPC request: {}", e);
+                        eprintln!("Failed to parse JSON-RPC request: {} (line: {})", e, line);
                         continue;
                     }
                 };
@@ -472,9 +464,17 @@ async fn main() -> Result<()> {
                         request,
                         &result_tx,
                         &request_id_counter,
-                        &mut stdout_lock,
+                        &analysis_states,
                     ).await {
                         eprintln!("Error handling request: {}", e);
+                    }
+                } else if request.method == "get_children" {
+                    // Handle get_children requests
+                    if let Err(e) = handle_get_children_request(
+                        request,
+                        &analysis_states,
+                    ).await {
+                        eprintln!("Error handling get_children request: {}", e);
                     }
                 } else {
                     // Unknown method - send error response
@@ -496,17 +496,24 @@ async fn main() -> Result<()> {
                                 continue;
                             }
                         };
-                        if let Err(e) = writeln!(stdout_lock, "{}", json) {
-                            eprintln!("Failed to write error response: {}", e);
-                            break;
-                        }
-                        if let Err(e) = stdout_lock.flush() {
-                            eprintln!("Failed to flush stdout: {}", e);
-                            break;
+                        // Lock stdout only for the write operation
+                        {
+                            let stdout = io::stdout();
+                            let mut stdout_lock = stdout.lock();
+                            if let Err(e) = writeln!(stdout_lock, "{}", json) {
+                                eprintln!("Failed to write error response: {}", e);
+                                break;
+                            }
+                            if let Err(e) = stdout_lock.flush() {
+                                eprintln!("Failed to flush stdout: {}", e);
+                                break;
+                            }
                         }
                     }
                 }
             }
+            
+            log::info!("Stdin closed, no more requests");
         })
     };
 
@@ -533,8 +540,8 @@ async fn main() -> Result<()> {
 async fn handle_analyze_heap_request(
     request: JsonRpcRequest,
     result_tx: &mpsc::UnboundedSender<AnalyzeHeapResult>,
-    request_id_counter: &AtomicU64,
-    stdout: &mut io::StdoutLock<'_>,
+    request_id_counter: &Arc<AtomicU64>,
+    analysis_states: &Arc<RwLock<HashMap<PathBuf, FileAnalysisState>>>,
 ) -> Result<()> {
     // Extract parameters
     let params = request.params.ok_or_else(|| anyhow::anyhow!("Missing params"))?;
@@ -559,16 +566,23 @@ async fn handle_analyze_heap_request(
     
     let json = serde_json::to_string(&processing_response)
         .context("Failed to serialize processing response")?;
-    writeln!(stdout, "{}", json)
-        .context("Failed to write processing response")?;
-    stdout.flush().context("Failed to flush stdout")?;
+    
+    // Lock stdout only for the write, then release immediately
+    {
+        let stdout = io::stdout();
+        let mut stdout_lock = stdout.lock();
+        writeln!(stdout_lock, "{}", json)
+            .context("Failed to write processing response")?;
+        stdout_lock.flush().context("Failed to flush stdout")?;
+    }
 
-    // Clone the result sender for the blocking task
+    // Clone the result sender and analysis states for the blocking task
     let result_tx = result_tx.clone();
+    let analysis_states = analysis_states.clone();
 
     // Spawn blocking task for CPU-intensive work
     task::spawn_blocking(move || {
-        let result = analyze_heap_blocking(path_buf, request_id);
+        let result = analyze_heap_blocking(path_buf, request_id, analysis_states);
 
         // Send result via channel (non-blocking)
         if let Err(e) = result_tx.send(result) {
@@ -579,3 +593,72 @@ async fn handle_analyze_heap_request(
     Ok(())
 }
 
+/// Handles a get_children request without requiring the full Server struct.
+async fn handle_get_children_request(
+    request: JsonRpcRequest,
+    analysis_states: &Arc<RwLock<HashMap<PathBuf, FileAnalysisState>>>,
+) -> Result<()> {
+    // Extract parameters
+    let params = request.params.ok_or_else(|| anyhow::anyhow!("Missing params"))?;
+    let path = params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'path' parameter"))?;
+    let object_id = params
+        .get("object_id")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'object_id' parameter"))?;
+
+    let request_id = request.id.ok_or_else(|| anyhow::anyhow!("Request ID required"))?;
+
+    // Get analysis state for this file
+    let analysis_states_guard = analysis_states.read()
+        .map_err(|e| anyhow::anyhow!("Failed to read analysis states: {}", e))?;
+    
+    let file_state = analysis_states_guard.get(&PathBuf::from(path))
+        .ok_or_else(|| anyhow::anyhow!("No analysis found for file: {}", path))?;
+
+    let state_guard = file_state.state.read()
+        .map_err(|e| anyhow::anyhow!("Failed to read analysis state: {}", e))?;
+
+    let analysis_state = state_guard.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Analysis state not available"))?;
+
+    // Get children
+    let response = match analysis_state.get_children(object_id) {
+        Some(children) => {
+            JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id: request_id,
+                result: Some(serde_json::to_value(children)?),
+                error: None,
+            }
+        }
+        None => {
+            JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id: request_id,
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32000,
+                    message: format!("Node not found or has no children: object_id={}", object_id),
+                    data: None,
+                }),
+            }
+        }
+    };
+
+    let json = serde_json::to_string(&response)
+        .context("Failed to serialize get_children response")?;
+    
+    // Lock stdout only for the write, then release immediately
+    {
+        let stdout = io::stdout();
+        let mut stdout_lock = stdout.lock();
+        writeln!(stdout_lock, "{}", json)
+            .context("Failed to write get_children response")?;
+        stdout_lock.flush().context("Failed to flush stdout")?;
+    }
+
+    Ok(())
+}

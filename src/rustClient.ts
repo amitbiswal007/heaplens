@@ -59,6 +59,7 @@ export class RustClient {
     private process: ChildProcess;
     private isShutdown: boolean = false;
     private buffer: string = '';
+    public onStderr?: (message: string) => void;
 
     /**
      * Creates a new RustClient instance.
@@ -82,10 +83,14 @@ export class RustClient {
             this.handleMessage(line);
         });
 
-        // Handle stderr
+        // Handle stderr - will be logged to output channel if provided
         this.process.stderr?.on('data', (data: Buffer) => {
             const message = data.toString();
             console.error(`[Rust server stderr] ${message}`);
+            // Also emit an event so extension can log it
+            if (this.onStderr) {
+                this.onStderr(message);
+            }
         });
 
         // Handle process exit
@@ -114,6 +119,11 @@ export class RustClient {
 
         try {
             const message = JSON.parse(line);
+            
+            // Log notifications for debugging
+            if (!('id' in message)) {
+                console.log(`[RustClient] Received notification: ${(message as JsonRpcNotification).method}`);
+            }
 
             // Check if it's a notification (no id field)
             if (!('id' in message)) {
