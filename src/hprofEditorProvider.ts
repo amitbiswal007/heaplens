@@ -2,6 +2,9 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import { RustClient } from './rustClient';
 import { getWebviewContent } from './webviewProvider';
+import { AnalysisData, formatAnalysisContext } from './analysisContext';
+import { streamLlmResponse, LlmConfig, ChatMessage } from './llmClient';
+import { HEAP_ANALYSIS_SYSTEM_PROMPT, buildAnalyzePrompt } from './promptTemplates';
 
 /**
  * Custom readonly editor provider for .hprof files.
@@ -14,6 +17,12 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
 
     private rustClient: RustClient | null = null;
     private outputChannel: vscode.OutputChannel;
+    private lastAnalysisData: AnalysisData | null = null;
+    private activeWebviewPanel: vscode.WebviewPanel | null = null;
+    private currentHprofPath: string | null = null;
+    private chatHistory: ChatMessage[] = [];
+    private pendingWebviewMessage: any = null;
+    private webviewReady = false;
 
     constructor(
         private readonly context: vscode.ExtensionContext,
@@ -40,6 +49,10 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         };
 
         const hprofPath = document.uri.fsPath;
+        this.activeWebviewPanel = webviewPanel;
+        this.currentHprofPath = hprofPath;
+        this.webviewReady = false;
+        this.pendingWebviewMessage = null;
         this.outputChannel.show(true);
         this.outputChannel.appendLine(`[HeapLens] Opening HPROF file: ${hprofPath}`);
         this.outputChannel.appendLine(`[HeapLens] File exists: ${fs.existsSync(hprofPath)}`);
@@ -96,8 +109,18 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                         });
                     }
                     break;
+                case 'chatMessage':
+                    this.handleChatMessage(message.text, webviewPanel);
+                    break;
                 case 'ready':
                     this.outputChannel.appendLine('[HeapLens] Webview ready');
+                    this.webviewReady = true;
+                    // Resend analysis data if it arrived before webview was ready
+                    if (this.pendingWebviewMessage) {
+                        this.outputChannel.appendLine('[HeapLens] Resending buffered analysisComplete to webview');
+                        webviewPanel.webview.postMessage(this.pendingWebviewMessage);
+                        this.pendingWebviewMessage = null;
+                    }
                     break;
             }
         });
@@ -150,15 +173,31 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                 const histCount = (params.class_histogram || []).length;
                 const suspectCount = (params.leak_suspects || []).length;
                 this.outputChannel.appendLine(`[HeapLens] Data: ${topObjCount} objects, ${histCount} histogram entries, ${suspectCount} leak suspects`);
-                webviewPanel.webview.postMessage({
+
+                // Store analysis data for LLM integrations
+                this.lastAnalysisData = {
+                    summary: params.summary || null,
+                    topObjects: params.top_objects || [],
+                    leakSuspects: params.leak_suspects || [],
+                    classHistogram: params.class_histogram || []
+                };
+
+                const webviewMessage = {
                     command: 'analysisComplete',
                     topObjects: params.top_objects || [],
                     topLayers: params.top_layers || [],
                     summary: params.summary || null,
                     classHistogram: params.class_histogram || [],
                     leakSuspects: params.leak_suspects || []
-                });
-                this.outputChannel.appendLine('[HeapLens] Posted analysisComplete to webview');
+                };
+
+                if (this.webviewReady) {
+                    webviewPanel.webview.postMessage(webviewMessage);
+                    this.outputChannel.appendLine('[HeapLens] Posted analysisComplete to webview');
+                } else {
+                    this.pendingWebviewMessage = webviewMessage;
+                    this.outputChannel.appendLine('[HeapLens] Webview not ready yet, buffering analysisComplete');
+                }
             } else if (params.status === 'error') {
                 this.outputChannel.appendLine(`[HeapLens] Analysis error: ${params.error}`);
                 webviewPanel.webview.postMessage({
@@ -210,8 +249,76 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         );
     }
 
+    private handleChatMessage(text: string, webviewPanel: vscode.WebviewPanel): void {
+        const config = vscode.workspace.getConfiguration('heaplens.llm');
+        const llmConfig: LlmConfig = {
+            provider: config.get<'anthropic' | 'openai'>('provider', 'anthropic'),
+            apiKey: config.get<string>('apiKey', ''),
+            baseUrl: config.get<string>('baseUrl', '') || undefined,
+            model: config.get<string>('model', '') || undefined,
+        };
+
+        if (!llmConfig.apiKey) {
+            webviewPanel.webview.postMessage({
+                command: 'chatError',
+                message: 'No API key configured. Go to Settings and search for "heaplens.llm.apiKey" to set your API key.'
+            });
+            return;
+        }
+
+        // Build messages with analysis context
+        const messages: ChatMessage[] = [
+            { role: 'system', content: HEAP_ANALYSIS_SYSTEM_PROMPT }
+        ];
+
+        // Add analysis context on first message or if no history
+        if (this.chatHistory.length === 0 && this.lastAnalysisData) {
+            const context = formatAnalysisContext(this.lastAnalysisData);
+            const userPrompt = buildAnalyzePrompt(context, text);
+            messages.push({ role: 'user', content: userPrompt });
+        } else {
+            // Include prior conversation
+            messages.push(...this.chatHistory);
+            messages.push({ role: 'user', content: text });
+        }
+
+        // Track user message
+        this.chatHistory.push({ role: 'user', content: text });
+
+        let assistantResponse = '';
+
+        streamLlmResponse(
+            llmConfig,
+            messages,
+            (chunk) => {
+                assistantResponse += chunk;
+                webviewPanel.webview.postMessage({ command: 'chatChunk', text: chunk });
+            },
+            () => {
+                this.chatHistory.push({ role: 'assistant', content: assistantResponse });
+                webviewPanel.webview.postMessage({ command: 'chatDone' });
+            },
+            (error) => {
+                this.outputChannel.appendLine(`[HeapLens] Chat error: ${error}`);
+                webviewPanel.webview.postMessage({ command: 'chatError', message: error });
+            }
+        );
+    }
+
     public getRustClient(): RustClient | null {
         return this.rustClient;
+    }
+
+    public getAnalysisData(): AnalysisData | null {
+        return this.lastAnalysisData;
+    }
+
+    public getActiveWebviewPanel(): vscode.WebviewPanel | null {
+        return this.activeWebviewPanel;
+    }
+
+    public getCurrentHprofPath(): string | null {
+        return this.currentHprofPath;
     }
 
     public dispose(): void {

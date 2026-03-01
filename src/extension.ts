@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { HprofEditorProvider } from './hprofEditorProvider';
+import { registerChatParticipant } from './chatParticipant';
 
 let outputChannel: vscode.OutputChannel | null = null;
 let editorProvider: HprofEditorProvider | null = null;
@@ -36,6 +37,9 @@ export function activate(context: vscode.ExtensionContext) {
             { webviewOptions: { retainContextWhenHidden: true } }
         )
     );
+
+    // Register chat participant for Copilot Chat integration
+    registerChatParticipant(context, () => editorProvider?.getAnalysisData() ?? null);
 
     // Command: Analyze HPROF file (opens file picker, then opens as custom editor)
     context.subscriptions.push(

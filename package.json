@@ -4,7 +4,7 @@
   "description": "LLM-powered Java heap dump analyzer with interactive visualizations",
   "version": "0.1.0",
   "engines": {
-    "vscode": "^1.74.0"
+    "vscode": "^1.93.0"
   },
   "categories": [
     "Debuggers",
@@ -27,6 +27,29 @@
         "title": "HeapLens: Export Analysis to JSON"
       }
     ],
+    "chatParticipants": [
+      {
+        "id": "heaplens.chat",
+        "fullName": "HeapLens",
+        "name": "heaplens",
+        "description": "Analyze Java heap dumps with AI assistance",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "analyze",
+            "description": "Analyze the heap dump and identify memory issues"
+          },
+          {
+            "name": "leaks",
+            "description": "Focus on memory leak suspects"
+          },
+          {
+            "name": "explain",
+            "description": "Explain a specific class or memory concept"
+          }
+        ]
+      }
+    ],
     "customEditors": [
       {
         "viewType": "heaplens.hprofEditor",
@@ -38,7 +61,33 @@
         ],
         "priority": "default"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "HeapLens",
+      "properties": {
+        "heaplens.llm.provider": {
+          "type": "string",
+          "enum": ["anthropic", "openai"],
+          "default": "anthropic",
+          "description": "LLM provider for the AI Chat tab"
+        },
+        "heaplens.llm.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for the LLM provider"
+        },
+        "heaplens.llm.baseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Custom base URL for API requests (for proxies or self-hosted endpoints)"
+        },
+        "heaplens.llm.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model name override (defaults to provider's recommended model)"
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
@@ -50,11 +99,10 @@
   },
   "devDependencies": {
     "@types/node": "^18.0.0",
-    "@types/vscode": "^1.74.0",
+    "@types/vscode": "^1.109.0",
     "@typescript-eslint/eslint-plugin": "^5.45.0",
     "@typescript-eslint/parser": "^5.45.0",
     "eslint": "^8.28.0",
     "typescript": "^4.9.4"
-  },
-  "dependencies": {}
+  }
 }
