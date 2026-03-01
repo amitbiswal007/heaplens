@@ -1,5 +1,13 @@
 import * as vscode from 'vscode';
-import type { DependencyResolver } from './dependencyResolver';
+import type { DependencyResolver, DependencyInfo } from './dependencyResolver';
+
+export type ResolutionTier = 'workspace' | 'source-jar' | 'decompiled';
+
+export interface SourceResolutionResult {
+    uri: vscode.Uri;
+    tier: ResolutionTier;
+    dependency?: DependencyInfo;
+}
 
 let dependencyResolver: DependencyResolver | null = null;
 
@@ -15,10 +23,10 @@ const PRIMITIVE_ARRAYS = new Set([
 ]);
 
 /**
- * Resolves a Java class name to a .java file URI in the workspace.
- * Returns null for JDK classes, primitives, or classes not found in the workspace.
+ * Resolves a Java class name to a .java file URI in the workspace or dependencies.
+ * Returns null for JDK classes, primitives, or classes not found.
  */
-export async function resolveSource(className: string): Promise<vscode.Uri | null> {
+export async function resolveSource(className: string): Promise<SourceResolutionResult | null> {
     if (!className) {
         return null;
     }
@@ -61,26 +69,30 @@ export async function resolveSource(className: string): Promise<vscode.Uri | nul
     const files = await vscode.workspace.findFiles(glob, '**/node_modules/**', 5);
 
     if (files.length === 0) {
-        // Tier 2: check dependency source JARs
+        // Tier 2/3: check dependency source JARs or decompile
         if (dependencyResolver) {
-            return dependencyResolver.resolveFromDependencies(className);
+            const depResult = await dependencyResolver.resolveFromDependencies(className);
+            if (depResult) {
+                console.log(`[HeapLens] Source resolved: tier=${depResult.tier}, class=${className}`);
+                return { uri: depResult.uri, tier: depResult.tier, dependency: depResult.dependency };
+            }
         }
+        console.log(`[HeapLens] No source found for ${className}`);
         return null;
     }
 
+    let file: vscode.Uri;
     if (files.length === 1) {
-        return files[0];
-    }
-
-    // Disambiguate: prefer the file whose path contains the package segments
-    if (packageParts.length > 0) {
+        file = files[0];
+    } else if (packageParts.length > 0) {
+        // Disambiguate: prefer the file whose path contains the package segments
         const packagePath = packageParts.join('/');
         const match = files.find(f => f.fsPath.includes(packagePath));
-        if (match) {
-            return match;
-        }
+        file = match || files[0];
+    } else {
+        file = files[0];
     }
 
-    // Fallback: return first match
-    return files[0];
+    console.log(`[HeapLens] Source resolved: tier=workspace, class=${className}`);
+    return { uri: file, tier: 'workspace' };
 }

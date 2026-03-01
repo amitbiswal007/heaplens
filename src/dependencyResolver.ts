@@ -11,6 +11,18 @@ interface Dependency {
     version: string;
 }
 
+export interface DependencyInfo {
+    groupId: string;
+    artifactId: string;
+    version: string;
+}
+
+export interface DependencyResolutionResult {
+    uri: vscode.Uri;
+    dependency: DependencyInfo;
+    tier: 'source-jar' | 'decompiled';
+}
+
 type BuildTool = 'maven' | 'gradle' | 'none';
 
 export class DependencyResolver {
@@ -26,6 +38,7 @@ export class DependencyResolver {
     private buildTool: BuildTool | null = null;
     private dependencies: Dependency[] = [];
     private extractedCache = new Map<string, string>();
+    private dependencyCache = new Map<string, { dependency: DependencyInfo; tier: 'source-jar' | 'decompiled' }>();
     private tempDir: string;
     private initPromise: Promise<void> | null = null;
     private offeredSourceDownload = false;
@@ -40,10 +53,13 @@ export class DependencyResolver {
         this.tempDir = path.join(os.tmpdir(), 'heaplens-sources');
     }
 
-    async resolveFromDependencies(className: string): Promise<vscode.Uri | null> {
+    async resolveFromDependencies(className: string): Promise<DependencyResolutionResult | null> {
         await this.ensureInitialized();
 
+        this.outputChannel.appendLine(`[HeapLens] Resolving dependency for: ${className}`);
+
         if (this.buildTool === 'none' || this.dependencies.length === 0) {
+            this.outputChannel.appendLine(`[HeapLens] No dependencies available (buildTool=${this.buildTool})`);
             return null;
         }
 
@@ -58,21 +74,29 @@ export class DependencyResolver {
 
         // Check cache
         const cached = this.extractedCache.get(internalPath);
-        if (cached && fs.existsSync(cached)) {
-            return vscode.Uri.file(cached);
+        const cachedDepInfo = this.dependencyCache.get(internalPath);
+        if (cached && fs.existsSync(cached) && cachedDepInfo) {
+            this.outputChannel.appendLine(`[HeapLens] Cache hit for ${className} (${cachedDepInfo.tier}, ${cachedDepInfo.dependency.groupId}:${cachedDepInfo.dependency.artifactId}:${cachedDepInfo.dependency.version})`);
+            return { uri: vscode.Uri.file(cached), dependency: cachedDepInfo.dependency, tier: cachedDepInfo.tier };
         }
 
         // Try each dependency's source JAR
         for (const dep of this.dependencies) {
+            this.outputChannel.appendLine(`[HeapLens] Trying ${dep.groupId}:${dep.artifactId}:${dep.version}...`);
             const jarPath = this.findSourceJar(dep);
             if (!jarPath) {
+                this.outputChannel.appendLine(`[HeapLens] No source JAR for ${dep.groupId}:${dep.artifactId}:${dep.version}`);
                 continue;
             }
 
+            this.outputChannel.appendLine(`[HeapLens] Source JAR found at ${jarPath}`);
             const extracted = await this.extractFromJar(jarPath, internalPath);
             if (extracted) {
                 this.extractedCache.set(internalPath, extracted);
-                return vscode.Uri.file(extracted);
+                const depInfo: DependencyInfo = { groupId: dep.groupId, artifactId: dep.artifactId, version: dep.version };
+                this.dependencyCache.set(internalPath, { dependency: depInfo, tier: 'source-jar' });
+                this.outputChannel.appendLine(`[HeapLens] Resolved ${className} via source-jar from ${dep.groupId}:${dep.artifactId}:${dep.version}`);
+                return { uri: vscode.Uri.file(extracted), dependency: depInfo, tier: 'source-jar' };
             }
         }
 
@@ -89,7 +113,10 @@ export class DependencyResolver {
                     const extracted = await this.extractFromJar(jarPath, internalPath);
                     if (extracted) {
                         this.extractedCache.set(internalPath, extracted);
-                        return vscode.Uri.file(extracted);
+                        const depInfo: DependencyInfo = { groupId: dep.groupId, artifactId: dep.artifactId, version: dep.version };
+                        this.dependencyCache.set(internalPath, { dependency: depInfo, tier: 'source-jar' });
+                        this.outputChannel.appendLine(`[HeapLens] Resolved ${className} via source-jar from ${dep.groupId}:${dep.artifactId}:${dep.version} (post-download)`);
+                        return { uri: vscode.Uri.file(extracted), dependency: depInfo, tier: 'source-jar' };
                     }
                 }
             }
@@ -108,16 +135,22 @@ export class DependencyResolver {
             for (const dep of this.dependencies) {
                 const compiledJar = this.findCompiledJar(dep);
                 if (!compiledJar) {
+                    this.outputChannel.appendLine(`[HeapLens] No compiled JAR for ${dep.groupId}:${dep.artifactId}:${dep.version}`);
                     continue;
                 }
+                this.outputChannel.appendLine(`[HeapLens] Compiled JAR found at ${compiledJar}`);
                 const decompiled = await this.decompileClass(baseName, compiledJar);
                 if (decompiled) {
                     this.extractedCache.set(internalPath, decompiled);
-                    return vscode.Uri.file(decompiled);
+                    const depInfo: DependencyInfo = { groupId: dep.groupId, artifactId: dep.artifactId, version: dep.version };
+                    this.dependencyCache.set(internalPath, { dependency: depInfo, tier: 'decompiled' });
+                    this.outputChannel.appendLine(`[HeapLens] Resolved ${className} via decompiled from ${dep.groupId}:${dep.artifactId}:${dep.version}`);
+                    return { uri: vscode.Uri.file(decompiled), dependency: depInfo, tier: 'decompiled' };
                 }
             }
         }
 
+        this.outputChannel.appendLine(`[HeapLens] No dependency match found for ${className}`);
         return null;
     }
 
@@ -567,6 +600,7 @@ export class DependencyResolver {
             this.outputChannel.appendLine(`HeapLens: Failed to clean temp dir: ${e.message}`);
         }
         this.extractedCache.clear();
+        this.dependencyCache.clear();
         this.dependencies = [];
         this.buildTool = null;
     }

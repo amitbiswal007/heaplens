@@ -161,6 +161,19 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         }
         .tree-row:hover .tree-source { opacity: 0.6; }
         .tree-source:hover { opacity: 1 !important; }
+        .dep-badge {
+            display: inline-block;
+            font-size: 10px;
+            padding: 1px 6px;
+            border-radius: 3px;
+            background: var(--vscode-badge-background);
+            color: var(--vscode-badge-foreground);
+            opacity: 0.8;
+            margin-left: 6px;
+            white-space: nowrap;
+        }
+        .dep-badge.workspace { background: var(--vscode-testing-iconPassed, #388a34); }
+        .dep-badge.decompiled { opacity: 0.6; font-style: italic; }
 
         /* Leak suspect cards */
         .suspect-card {
@@ -408,6 +421,7 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         let histogramSortCol = 'retained_size';
         let histogramSortAsc = false;
         let histogramFilter = '';
+        const depInfoCache = {};
 
         // ---- Tab switching ----
         document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -439,6 +453,10 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     break;
                 case 'sourceNotFound':
                     showSourceToast(msg.className);
+                    break;
+                case 'dependencyResolved':
+                    depInfoCache[msg.className] = { tier: msg.tier, dependency: msg.dependency };
+                    updateDependencyBadges(msg.className, msg.tier, msg.dependency);
                     break;
                 case 'error':
                     showError(msg.message);
@@ -490,6 +508,46 @@ export function getWebviewContent(_webview: vscode.Webview): string {
             toast.classList.add('visible');
             if (toastTimer) clearTimeout(toastTimer);
             toastTimer = setTimeout(() => toast.classList.remove('visible'), 3000);
+        }
+
+        function makeBadgeHtml(tier, dep) {
+            let text, tooltip, cls;
+            if (tier === 'workspace') {
+                text = 'workspace';
+                tooltip = 'Resolved from workspace source';
+                cls = 'dep-badge workspace';
+            } else {
+                text = dep ? dep.artifactId + ':' + dep.version : tier;
+                tooltip = dep ? dep.groupId + ':' + dep.artifactId + ':' + dep.version + ' (' + tier + ')' : tier;
+                cls = 'dep-badge' + (tier === 'decompiled' ? ' decompiled' : '');
+            }
+            return '<span class="' + cls + '" title="' + escapeHtml(tooltip) + '">' + escapeHtml(text) + '</span>';
+        }
+
+        function updateDependencyBadges(className, tier, dep) {
+            const badgeHtml = makeBadgeHtml(tier, dep);
+
+            // Update leak suspect cards
+            document.querySelectorAll('.go-to-source-link[data-class="' + className + '"]').forEach(function(link) {
+                // Remove existing badge if present
+                const existing = link.parentElement.querySelector('.dep-badge');
+                if (existing) existing.remove();
+                link.insertAdjacentHTML('afterend', badgeHtml);
+            });
+
+            // Update dominator tree rows
+            document.querySelectorAll('.tree-row').forEach(function(row) {
+                const nameEl = row.querySelector('.tree-name');
+                if (nameEl && nameEl.textContent === className) {
+                    // Remove existing badge if present
+                    const existing = row.querySelector('.dep-badge');
+                    if (existing) existing.remove();
+                    const sourceEl = row.querySelector('.tree-source');
+                    if (sourceEl) {
+                        sourceEl.insertAdjacentHTML('afterend', badgeHtml);
+                    }
+                }
+            });
         }
 
         // ---- Tab 1: Overview ----
@@ -637,6 +695,9 @@ export function getWebviewContent(_webview: vscode.Webview): string {
 
             const showSource = (obj.node_type === 'Instance' || obj.node_type === 'Array') && isResolvableClass(displayName);
 
+            const cachedDep = depInfoCache[displayName];
+            const depBadge = cachedDep ? makeBadgeHtml(cachedDep.tier, cachedDep.dependency) : '';
+
             row.innerHTML =
                 '<span class="tree-toggle">' + (leaf ? '' : '▶') + '</span>' +
                 '<span class="tree-name">' + escapeHtml(displayName) + '</span>' +
@@ -645,7 +706,8 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                 '<span class="tree-size">' + fmt(obj.retained_size) + '</span>' +
                 '<span class="tree-bar-wrap"><div class="tree-bar" style="width:' + barWidth + '%"></div></span>' +
                 '<span class="tree-pct">' + pctStr + '%</span>' +
-                (showSource ? '<span class="tree-source" title="Go to source">&#8599;</span>' : '');
+                (showSource ? '<span class="tree-source" title="Go to source">&#8599;</span>' : '') +
+                depBadge;
 
             if (!leaf) {
                 row.addEventListener('click', () => {
@@ -797,7 +859,9 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                 const sourceLink = isResolvableClass(s.class_name)
                     ? ' | <a class="go-to-source-link" data-class="' + escapeHtml(s.class_name) + '">View Source</a>'
                     : '';
-                return '<div class="suspect-card ' + severity + '">' +
+                const cachedDep = depInfoCache[s.class_name];
+                const depBadge = cachedDep ? makeBadgeHtml(cachedDep.tier, cachedDep.dependency) : '';
+                return '<div class="suspect-card ' + severity + '" data-class="' + escapeHtml(s.class_name) + '">' +
                     '<div class="suspect-header">' +
                     '<span class="suspect-class">' + escapeHtml(s.class_name) + '</span>' +
                     '<span class="suspect-badge ' + severity + '">' + s.retained_percentage.toFixed(1) + '%</span>' +
@@ -805,7 +869,7 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     '<div class="suspect-desc">' + escapeHtml(s.description) + '</div>' +
                     '<div style="margin-top:8px;opacity:0.6;font-size:12px;">Retained: ' + fmt(s.retained_size) +
                     (s.object_id ? ' | Object ID: ' + s.object_id : '') +
-                    sourceLink + '</div>' +
+                    sourceLink + depBadge + '</div>' +
                     '</div>';
             }).join('');
 

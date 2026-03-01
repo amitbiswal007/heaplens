@@ -26,6 +26,7 @@ export interface AnalysisData {
         retained_size: number;
         retained_percentage: number;
         description: string;
+        dependency?: { groupId: string; artifactId: string; version: string };
     }>;
     classHistogram: Array<{
         class_name: string;
@@ -87,7 +88,8 @@ export function formatAnalysisContext(data: AnalysisData): string {
         parts.push('## Leak Suspects\n');
         for (const s of data.leakSuspects) {
             const severity = s.retained_percentage > 30 ? 'HIGH' : 'MEDIUM';
-            parts.push(`- **[${severity}] ${s.class_name}** - retains ${s.retained_percentage.toFixed(1)}% of heap (${fmtBytes(s.retained_size)}) - ${s.description}`);
+            const depSuffix = s.dependency ? ` (from ${s.dependency.groupId}:${s.dependency.artifactId}:${s.dependency.version})` : '';
+            parts.push(`- **[${severity}] ${s.class_name}**${depSuffix} - retains ${s.retained_percentage.toFixed(1)}% of heap (${fmtBytes(s.retained_size)}) - ${s.description}`);
         }
         parts.push('');
     }

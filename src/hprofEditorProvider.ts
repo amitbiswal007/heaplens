@@ -6,6 +6,7 @@ import { AnalysisData, formatAnalysisContext } from './analysisContext';
 import { streamLlmResponse, LlmConfig, ChatMessage } from './llmClient';
 import { HEAP_ANALYSIS_SYSTEM_PROMPT, buildAnalyzePrompt } from './promptTemplates';
 import { resolveSource } from './sourceResolver';
+import type { DependencyInfo } from './dependencyResolver';
 
 /**
  * Custom readonly editor provider for .hprof files.
@@ -24,6 +25,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
     private chatHistory: ChatMessage[] = [];
     private pendingWebviewMessage: any = null;
     private webviewReady = false;
+    private dependencyInfoCache = new Map<string, { tier: string; dependency?: DependencyInfo }>();
 
     constructor(
         private readonly context: vscode.ExtensionContext,
@@ -116,6 +118,18 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                 case 'goToSource':
                     this.handleGoToSource(message.className, webviewPanel);
                     break;
+                case 'queryDependencyInfo': {
+                    const cached = this.dependencyInfoCache.get(message.className);
+                    if (cached) {
+                        webviewPanel.webview.postMessage({
+                            command: 'dependencyResolved',
+                            className: message.className,
+                            tier: cached.tier,
+                            dependency: cached.dependency
+                        });
+                    }
+                    break;
+                }
                 case 'ready':
                     this.outputChannel.appendLine('[HeapLens] Webview ready');
                     this.webviewReady = true;
@@ -310,10 +324,27 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
     }
 
     private async handleGoToSource(className: string, webviewPanel: vscode.WebviewPanel): Promise<void> {
-        const uri = await resolveSource(className);
-        if (uri) {
-            await vscode.window.showTextDocument(uri);
+        this.outputChannel.appendLine(`[HeapLens] Go to source requested for: ${className}`);
+        const result = await resolveSource(className);
+        if (result) {
+            this.outputChannel.appendLine(`[HeapLens] Source found: tier=${result.tier}, uri=${result.uri.fsPath}`);
+            await vscode.window.showTextDocument(result.uri);
+
+            // Cache and send dependency info to webview
+            const info: { tier: string; dependency?: DependencyInfo } = { tier: result.tier };
+            if (result.dependency) {
+                info.dependency = result.dependency;
+            }
+            this.dependencyInfoCache.set(className, info);
+
+            webviewPanel.webview.postMessage({
+                command: 'dependencyResolved',
+                className,
+                tier: result.tier,
+                dependency: result.dependency
+            });
         } else {
+            this.outputChannel.appendLine(`[HeapLens] No source found for: ${className}`);
             webviewPanel.webview.postMessage({ command: 'sourceNotFound', className });
         }
     }
@@ -323,7 +354,22 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
     }
 
     public getAnalysisData(): AnalysisData | null {
-        return this.lastAnalysisData;
+        if (!this.lastAnalysisData) {
+            return null;
+        }
+
+        // Enrich leak suspects with cached dependency info
+        const enriched: AnalysisData = {
+            ...this.lastAnalysisData,
+            leakSuspects: this.lastAnalysisData.leakSuspects.map(s => {
+                const cached = this.dependencyInfoCache.get(s.class_name);
+                if (cached?.dependency) {
+                    return { ...s, dependency: cached.dependency };
+                }
+                return s;
+            })
+        };
+        return enriched;
     }
 
     public getActiveWebviewPanel(): vscode.WebviewPanel | null {
