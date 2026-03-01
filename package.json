@@ -100,6 +100,11 @@
           "type": "string",
           "default": "",
           "description": "Custom Gradle cache path (defaults to ~/.gradle/caches/modules-2/files-2.1)"
+        },
+        "heaplens.sourceResolution.decompilerEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "When source JARs are unavailable, decompile .class files using CFR decompiler (requires java on PATH)"
         }
       }
     }

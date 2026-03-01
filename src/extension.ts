@@ -47,7 +47,7 @@ export function activate(context: vscode.ExtensionContext) {
     // Set up dependency resolver for source code bridge Tier 2
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     if (workspaceFolder) {
-        depResolver = new DependencyResolver(workspaceFolder.uri.fsPath, outputChannel);
+        depResolver = new DependencyResolver(workspaceFolder.uri.fsPath, outputChannel, context.globalStorageUri.fsPath);
         setDependencyResolver(depResolver);
     }
 

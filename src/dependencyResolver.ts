@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import * as https from 'https';
 import { execFile } from 'child_process';
 
 interface Dependency {
@@ -13,18 +14,29 @@ interface Dependency {
 type BuildTool = 'maven' | 'gradle' | 'none';
 
 export class DependencyResolver {
+    private static readonly CFR_VERSION = '0.152';
+    private static readonly CFR_DOWNLOAD_URL =
+        `https://github.com/leibnitz27/cfr/releases/download/${DependencyResolver.CFR_VERSION}/cfr-${DependencyResolver.CFR_VERSION}.jar`;
+    private static readonly DECOMPILED_HEADER = '// Decompiled by HeapLens (CFR decompiler)\n\n';
+
     private workspaceRoot: string;
     private outputChannel: vscode.OutputChannel;
+    private globalStoragePath: string;
+    private cfrJarPath: string;
     private buildTool: BuildTool | null = null;
     private dependencies: Dependency[] = [];
     private extractedCache = new Map<string, string>();
     private tempDir: string;
     private initPromise: Promise<void> | null = null;
     private offeredSourceDownload = false;
+    private cfrDownloadAttempted = false;
+    private javaAvailable: boolean | null = null;
 
-    constructor(workspaceRoot: string, outputChannel: vscode.OutputChannel) {
+    constructor(workspaceRoot: string, outputChannel: vscode.OutputChannel, globalStoragePath: string) {
         this.workspaceRoot = workspaceRoot;
         this.outputChannel = outputChannel;
+        this.globalStoragePath = globalStoragePath;
+        this.cfrJarPath = path.join(globalStoragePath, `cfr-${DependencyResolver.CFR_VERSION}.jar`);
         this.tempDir = path.join(os.tmpdir(), 'heaplens-sources');
     }
 
@@ -79,6 +91,29 @@ export class DependencyResolver {
                         this.extractedCache.set(internalPath, extracted);
                         return vscode.Uri.file(extracted);
                     }
+                }
+            }
+        }
+
+        // Tier 3: Decompile from compiled JAR using CFR
+        const config = vscode.workspace.getConfiguration('heaplens');
+        if (config.get<boolean>('sourceResolution.decompilerEnabled') !== false) {
+            if (!await this.checkJavaAvailable()) {
+                return null;
+            }
+            if (!await this.ensureCfrAvailable()) {
+                return null;
+            }
+
+            for (const dep of this.dependencies) {
+                const compiledJar = this.findCompiledJar(dep);
+                if (!compiledJar) {
+                    continue;
+                }
+                const decompiled = await this.decompileClass(baseName, compiledJar);
+                if (decompiled) {
+                    this.extractedCache.set(internalPath, decompiled);
+                    return vscode.Uri.file(decompiled);
                 }
             }
         }
@@ -347,6 +382,180 @@ export class DependencyResolver {
                 );
             })
         );
+    }
+
+    private findCompiledJar(dep: Dependency): string | null {
+        if (this.buildTool === 'maven') {
+            return this.findMavenCompiledJar(dep);
+        }
+        return this.findGradleCompiledJar(dep);
+    }
+
+    private findMavenCompiledJar(dep: Dependency): string | null {
+        const config = vscode.workspace.getConfiguration('heaplens');
+        const customHome = config.get<string>('sourceResolution.mavenHome');
+        const repoRoot = customHome || path.join(os.homedir(), '.m2', 'repository');
+
+        const groupPath = dep.groupId.replace(/\./g, '/');
+        const jarPath = path.join(repoRoot, groupPath, dep.artifactId, dep.version,
+            `${dep.artifactId}-${dep.version}.jar`);
+
+        return fs.existsSync(jarPath) ? jarPath : null;
+    }
+
+    private findGradleCompiledJar(dep: Dependency): string | null {
+        const config = vscode.workspace.getConfiguration('heaplens');
+        const customHome = config.get<string>('sourceResolution.gradleHome');
+        const cacheRoot = customHome || path.join(os.homedir(), '.gradle', 'caches',
+            'modules-2', 'files-2.1');
+
+        const depDir = path.join(cacheRoot, dep.groupId, dep.artifactId, dep.version);
+        if (!fs.existsSync(depDir)) {
+            return null;
+        }
+
+        const jarName = `${dep.artifactId}-${dep.version}.jar`;
+        try {
+            for (const hashDir of fs.readdirSync(depDir)) {
+                const candidate = path.join(depDir, hashDir, jarName);
+                if (fs.existsSync(candidate)) {
+                    return candidate;
+                }
+            }
+        } catch {
+            // Directory read failed
+        }
+        return null;
+    }
+
+    private checkJavaAvailable(): Promise<boolean> {
+        if (this.javaAvailable !== null) {
+            return Promise.resolve(this.javaAvailable);
+        }
+
+        return new Promise((resolve) => {
+            execFile('java', ['-version'], { timeout: 5000 }, (error) => {
+                this.javaAvailable = !error;
+                if (error) {
+                    this.outputChannel.appendLine('HeapLens: java not found on PATH — decompilation unavailable');
+                }
+                resolve(this.javaAvailable);
+            });
+        });
+    }
+
+    private async ensureCfrAvailable(): Promise<boolean> {
+        if (fs.existsSync(this.cfrJarPath)) {
+            return true;
+        }
+        if (this.cfrDownloadAttempted) {
+            return false;
+        }
+        this.cfrDownloadAttempted = true;
+
+        this.outputChannel.appendLine('HeapLens: Downloading CFR decompiler...');
+        return this.downloadCfr();
+    }
+
+    private downloadCfr(): Promise<boolean> {
+        return new Promise((resolve) => {
+            fs.mkdirSync(this.globalStoragePath, { recursive: true });
+            const tmpPath = this.cfrJarPath + '.download';
+
+            const doGet = (url: string, redirects: number) => {
+                if (redirects > 5) {
+                    this.outputChannel.appendLine('HeapLens: CFR download failed — too many redirects');
+                    this.cleanupFile(tmpPath);
+                    return resolve(false);
+                }
+
+                https.get(url, (res) => {
+                    if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                        res.resume();
+                        doGet(res.headers.location, redirects + 1);
+                        return;
+                    }
+
+                    if (res.statusCode !== 200) {
+                        res.resume();
+                        this.outputChannel.appendLine(`HeapLens: CFR download failed — HTTP ${res.statusCode}`);
+                        this.cleanupFile(tmpPath);
+                        return resolve(false);
+                    }
+
+                    const file = fs.createWriteStream(tmpPath);
+                    res.pipe(file);
+                    file.on('finish', () => {
+                        file.close(() => {
+                            try {
+                                fs.renameSync(tmpPath, this.cfrJarPath);
+                                this.outputChannel.appendLine('HeapLens: CFR decompiler downloaded successfully');
+                                resolve(true);
+                            } catch (e: any) {
+                                this.outputChannel.appendLine(`HeapLens: Failed to finalize CFR download: ${e.message}`);
+                                this.cleanupFile(tmpPath);
+                                resolve(false);
+                            }
+                        });
+                    });
+                    file.on('error', (e) => {
+                        this.outputChannel.appendLine(`HeapLens: CFR download write error: ${e.message}`);
+                        this.cleanupFile(tmpPath);
+                        resolve(false);
+                    });
+                }).on('error', (e) => {
+                    this.outputChannel.appendLine(`HeapLens: CFR download failed: ${e.message}`);
+                    this.cleanupFile(tmpPath);
+                    resolve(false);
+                });
+            };
+
+            doGet(DependencyResolver.CFR_DOWNLOAD_URL, 0);
+        });
+    }
+
+    private cleanupFile(filePath: string): void {
+        try {
+            if (fs.existsSync(filePath)) {
+                fs.unlinkSync(filePath);
+            }
+        } catch {
+            // Best-effort cleanup
+        }
+    }
+
+    private decompileClass(className: string, jarPath: string): Promise<string | null> {
+        return new Promise((resolve) => {
+            execFile('java', ['-jar', this.cfrJarPath, className, '--jarfilepath', jarPath],
+                { timeout: 30000, maxBuffer: 5 * 1024 * 1024 },
+                (error, stdout, stderr) => {
+                    if (error || !stdout) {
+                        if (error) {
+                            this.outputChannel.appendLine(`HeapLens: CFR decompilation failed for ${className}: ${stderr || error.message}`);
+                        }
+                        return resolve(null);
+                    }
+
+                    // CFR outputs error messages starting with "/*" when class not found
+                    if (stdout.startsWith('/*\n') && !stdout.includes('\npublic ') && !stdout.includes('\nclass ')) {
+                        return resolve(null);
+                    }
+
+                    const internalPath = className.replace(/\./g, '/') + '.java';
+                    const outPath = path.join(this.tempDir, 'decompiled', internalPath);
+                    const outDir = path.dirname(outPath);
+
+                    try {
+                        fs.mkdirSync(outDir, { recursive: true });
+                        fs.writeFileSync(outPath, DependencyResolver.DECOMPILED_HEADER + stdout, 'utf-8');
+                        resolve(outPath);
+                    } catch (e: any) {
+                        this.outputChannel.appendLine(`HeapLens: Failed to write decompiled source: ${e.message}`);
+                        resolve(null);
+                    }
+                }
+            );
+        });
     }
 
     async dispose(): Promise<void> {
