@@ -40,22 +40,27 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         };
 
         const hprofPath = document.uri.fsPath;
-        this.outputChannel.appendLine(`Opening HPROF file: ${hprofPath}`);
+        this.outputChannel.show(true);
+        this.outputChannel.appendLine(`[HeapLens] Opening HPROF file: ${hprofPath}`);
+        this.outputChannel.appendLine(`[HeapLens] File exists: ${fs.existsSync(hprofPath)}`);
 
         webviewPanel.webview.html = getWebviewContent(webviewPanel.webview);
 
         // Ensure Rust client is running
         const client = this.getOrCreateClient();
         if (!client) {
+            this.outputChannel.appendLine('[HeapLens] ERROR: Failed to create Rust client');
             webviewPanel.webview.postMessage({
                 command: 'error',
                 message: 'Failed to start analysis server'
             });
             return;
         }
+        this.outputChannel.appendLine('[HeapLens] Rust client created successfully');
 
         // Wire webview <-> RustClient message passing
         webviewPanel.webview.onDidReceiveMessage(async (message) => {
+            this.outputChannel.appendLine(`[HeapLens] Webview message: ${message.command}`);
             switch (message.command) {
                 case 'getChildren':
                     try {
@@ -87,7 +92,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                     }
                     break;
                 case 'ready':
-                    this.outputChannel.appendLine('Webview ready');
+                    this.outputChannel.appendLine('[HeapLens] Webview ready');
                     break;
             }
         });
@@ -98,10 +103,14 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
 
     private getOrCreateClient(): RustClient | null {
         if (this.rustClient && !this.rustClient.isDisposed) {
+            this.outputChannel.appendLine('[HeapLens] Reusing existing Rust client');
             return this.rustClient;
         }
 
         const serverPath = this.getServerPath();
+        this.outputChannel.appendLine(`[HeapLens] Server binary path: ${serverPath}`);
+        this.outputChannel.appendLine(`[HeapLens] Server binary exists: ${fs.existsSync(serverPath)}`);
+
         if (!fs.existsSync(serverPath)) {
             vscode.window.showErrorMessage(`HeapLens server not found at ${serverPath}. Build with: cd hprof-analyzer && cargo build --release`);
             return null;
@@ -112,8 +121,10 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
             this.rustClient.onStderr = (msg: string) => {
                 this.outputChannel.appendLine(`[server] ${msg.trim()}`);
             };
+            this.outputChannel.appendLine('[HeapLens] Rust server process spawned');
             return this.rustClient;
         } catch (error: any) {
+            this.outputChannel.appendLine(`[HeapLens] ERROR spawning server: ${error.message}`);
             vscode.window.showErrorMessage(`Failed to start HeapLens server: ${error.message}`);
             return null;
         }
@@ -128,7 +139,12 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
 
         client.onNotification('heap_analysis_complete', (params: any) => {
             analysisComplete = true;
+            this.outputChannel.appendLine(`[HeapLens] Received heap_analysis_complete notification, status: ${params.status}`);
             if (params.status === 'completed') {
+                const topObjCount = (params.top_objects || []).length;
+                const histCount = (params.class_histogram || []).length;
+                const suspectCount = (params.leak_suspects || []).length;
+                this.outputChannel.appendLine(`[HeapLens] Data: ${topObjCount} objects, ${histCount} histogram entries, ${suspectCount} leak suspects`);
                 webviewPanel.webview.postMessage({
                     command: 'analysisComplete',
                     topObjects: params.top_objects || [],
@@ -137,14 +153,17 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                     classHistogram: params.class_histogram || [],
                     leakSuspects: params.leak_suspects || []
                 });
-                this.outputChannel.appendLine(`Analysis complete: ${(params.top_objects || []).length} objects`);
+                this.outputChannel.appendLine('[HeapLens] Posted analysisComplete to webview');
             } else if (params.status === 'error') {
+                this.outputChannel.appendLine(`[HeapLens] Analysis error: ${params.error}`);
                 webviewPanel.webview.postMessage({
                     command: 'error',
                     message: params.error || 'Unknown error'
                 });
             }
         });
+
+        this.outputChannel.appendLine(`[HeapLens] Sending analyze_heap request for: ${hprofPath}`);
 
         await vscode.window.withProgress(
             {
@@ -156,10 +175,13 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                 progress.report({ increment: 0, message: 'Starting analysis...' });
 
                 try {
+                    this.outputChannel.appendLine('[HeapLens] Awaiting analyze_heap response...');
                     const response = await client.sendRequest('analyze_heap', { path: hprofPath });
+                    this.outputChannel.appendLine(`[HeapLens] Got response: ${JSON.stringify(response)}`);
 
                     if (response.status === 'processing') {
                         progress.report({ increment: 30, message: 'Building heap graph...' });
+                        this.outputChannel.appendLine('[HeapLens] Status=processing, waiting for notification...');
 
                         const timeout = 300000;
                         const startTime = Date.now();
@@ -170,9 +192,11 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                         if (!analysisComplete) {
                             throw new Error('Analysis timed out after 5 minutes');
                         }
+                        this.outputChannel.appendLine(`[HeapLens] Analysis completed in ${Date.now() - startTime}ms`);
                         progress.report({ increment: 100, message: 'Done!' });
                     }
                 } catch (error: any) {
+                    this.outputChannel.appendLine(`[HeapLens] ERROR: ${error.message}`);
                     vscode.window.showErrorMessage(`HeapLens analysis failed: ${error.message}`);
                 } finally {
                     client.offNotification('heap_analysis_complete');

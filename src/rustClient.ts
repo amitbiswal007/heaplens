@@ -66,10 +66,13 @@ export class RustClient {
      * @param binaryPath - Path to the Rust binary (hprof-server)
      */
     constructor(binaryPath: string) {
+        console.log(`[RustClient] Spawning: ${binaryPath}`);
         // Spawn the Rust process
         this.process = spawn(binaryPath, [], {
             stdio: ['pipe', 'pipe', 'pipe']
         });
+
+        console.log(`[RustClient] Process spawned, pid: ${this.process.pid}`);
 
         // Create readline interface to split stdout by newlines
         this.rl = readline.createInterface({
@@ -79,6 +82,7 @@ export class RustClient {
 
         // Handle each line from stdout
         this.rl.on('line', (line: string) => {
+            console.log(`[RustClient] Received line (${line.length} chars): ${line.substring(0, 200)}...`);
             this.handleMessage(line);
         });
 
@@ -94,15 +98,17 @@ export class RustClient {
 
         // Handle process exit
         this.process.on('exit', (code: number | null, signal: string | null) => {
+            console.log(`[RustClient] Process exited: code=${code}, signal=${signal}`);
             this.shutdown(
-                code !== 0 
-                    ? new Error(`Rust process exited with code ${code}, signal ${signal}`) 
+                code !== 0
+                    ? new Error(`Rust process exited with code ${code}, signal ${signal}`)
                     : null
             );
         });
 
         // Handle process errors
         this.process.on('error', (error: Error) => {
+            console.error(`[RustClient] Process error: ${error.message}`);
             this.shutdown(error);
         });
     }
