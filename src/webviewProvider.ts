@@ -129,14 +129,27 @@ export function getWebviewContent(_webview: vscode.Webview): string {
             display: flex;
             align-items: center;
             padding: 6px 12px;
-            cursor: pointer;
             border-bottom: 1px solid var(--vscode-panel-border);
         }
+        .tree-row.expandable { cursor: pointer; }
         .tree-row:hover { background: var(--vscode-list-hoverBackground); }
-        .tree-toggle { width: 20px; text-align: center; opacity: 0.6; flex-shrink: 0; }
+        .tree-toggle { width: 20px; text-align: center; opacity: 0.6; flex-shrink: 0; font-size: 11px; }
         .tree-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .tree-size { min-width: 100px; text-align: right; opacity: 0.8; }
-        .tree-pct { min-width: 60px; text-align: right; opacity: 0.6; font-size: 12px; }
+        .tree-type {
+            font-size: 10px;
+            padding: 1px 5px;
+            border-radius: 3px;
+            margin-left: 8px;
+            flex-shrink: 0;
+            opacity: 0.7;
+        }
+        .tree-type.array { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
+        .tree-type.instance { background: var(--vscode-editorWidget-background); border: 1px solid var(--vscode-panel-border); }
+        .tree-shallow { min-width: 80px; text-align: right; opacity: 0.5; font-size: 12px; }
+        .tree-size { min-width: 90px; text-align: right; opacity: 0.8; }
+        .tree-bar-wrap { width: 60px; flex-shrink: 0; margin: 0 8px; }
+        .tree-bar { height: 4px; border-radius: 2px; background: var(--vscode-progressBar-background); min-width: 1px; }
+        .tree-pct { min-width: 50px; text-align: right; opacity: 0.6; font-size: 12px; }
         .tree-children { padding-left: 20px; }
 
         /* Leak suspect cards */
@@ -230,6 +243,17 @@ export function getWebviewContent(_webview: vscode.Webview): string {
     <!-- Tab 3: Dominator Tree -->
     <div id="tab-domtree" class="tab-content">
         <button class="btn" id="reset-tree-btn" style="display:none; margin-bottom: 12px;">Back to Root</button>
+        <div id="domtree-header" style="display:none;">
+            <div class="tree-row" style="opacity:0.6; font-size:11px; border-bottom:2px solid var(--vscode-panel-border); cursor:default;">
+                <span class="tree-toggle"></span>
+                <span class="tree-name" style="font-weight:bold;">Class / Object</span>
+                <span class="tree-type" style="background:none; border:none;">Type</span>
+                <span class="tree-shallow" style="font-weight:bold;">Shallow</span>
+                <span class="tree-size" style="font-weight:bold;">Retained</span>
+                <span class="tree-bar-wrap"></span>
+                <span class="tree-pct" style="font-weight:bold;">%</span>
+            </div>
+        </div>
         <div id="dominator-tree"><div class="loading">Waiting for analysis...</div></div>
         <div id="sunburst-chart"></div>
     </div>
@@ -414,9 +438,21 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         let treeData = [];
         let totalRetained = 0;
 
+        const PRIMITIVE_ARRAYS = new Set([
+            'byte[]', 'short[]', 'int[]', 'long[]',
+            'float[]', 'double[]', 'char[]', 'boolean[]'
+        ]);
+
+        function isLeafType(obj) {
+            return PRIMITIVE_ARRAYS.has(obj.class_name);
+        }
+
         function renderDominatorTree(layers) {
             treeData = layers.filter(o => o.node_type !== 'Class' && o.node_type !== 'SuperRoot' && o.retained_size > 0);
             totalRetained = treeData.reduce((sum, o) => sum + o.retained_size, 0);
+
+            document.getElementById('domtree-header').style.display = treeData.length > 0 ? 'block' : 'none';
+            document.getElementById('reset-tree-btn').style.display = treeData.length > 0 ? 'inline-block' : 'none';
 
             const container = document.getElementById('dominator-tree');
             container.innerHTML = '';
@@ -427,35 +463,42 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         }
 
         function createTreeRow(obj, depth) {
+            const leaf = isLeafType(obj);
             const row = document.createElement('div');
-            row.className = 'tree-row';
+            row.className = 'tree-row' + (leaf ? '' : ' expandable');
             row.style.paddingLeft = (12 + depth * 20) + 'px';
             row.dataset.objectId = obj.object_id;
             row.dataset.depth = depth;
 
-            const pct = totalRetained > 0 ? ((obj.retained_size / totalRetained) * 100).toFixed(1) : '0';
+            const pct = totalRetained > 0 ? ((obj.retained_size / totalRetained) * 100) : 0;
+            const pctStr = pct.toFixed(1);
+            const barWidth = Math.max(1, Math.min(100, pct));
             const displayName = obj.class_name || obj.node_type;
+            const typeCls = obj.node_type === 'Array' ? 'array' : 'instance';
 
             row.innerHTML =
-                '<span class="tree-toggle">▶</span>' +
+                '<span class="tree-toggle">' + (leaf ? '' : '▶') + '</span>' +
                 '<span class="tree-name">' + escapeHtml(displayName) + '</span>' +
+                '<span class="tree-type ' + typeCls + '">' + obj.node_type + '</span>' +
+                '<span class="tree-shallow">' + fmt(obj.shallow_size) + '</span>' +
                 '<span class="tree-size">' + fmt(obj.retained_size) + '</span>' +
-                '<span class="tree-pct">' + pct + '%</span>';
+                '<span class="tree-bar-wrap"><div class="tree-bar" style="width:' + barWidth + '%"></div></span>' +
+                '<span class="tree-pct">' + pctStr + '%</span>';
 
-            row.addEventListener('click', () => {
-                const toggle = row.querySelector('.tree-toggle');
-                const childContainer = row.nextElementSibling;
+            if (!leaf) {
+                row.addEventListener('click', () => {
+                    const toggle = row.querySelector('.tree-toggle');
+                    const childContainer = row.nextElementSibling;
 
-                if (childContainer && childContainer.classList.contains('tree-children')) {
-                    // Toggle existing children
-                    childContainer.style.display = childContainer.style.display === 'none' ? 'block' : 'none';
-                    toggle.textContent = childContainer.style.display === 'none' ? '▶' : '▼';
-                } else if (toggle.textContent !== '·') {
-                    // Request children
-                    toggle.textContent = '...';
-                    vscode.postMessage({ command: 'getChildren', objectId: obj.object_id });
-                }
-            });
+                    if (childContainer && childContainer.classList.contains('tree-children')) {
+                        childContainer.style.display = childContainer.style.display === 'none' ? 'block' : 'none';
+                        toggle.textContent = childContainer.style.display === 'none' ? '▶' : '▼';
+                    } else if (toggle.textContent !== '·') {
+                        toggle.textContent = '⏳';
+                        vscode.postMessage({ command: 'getChildren', objectId: obj.object_id });
+                    }
+                });
+            }
 
             return row;
         }
