@@ -1327,6 +1327,9 @@ pub fn calculate_dominators(graph: &HeapGraph) -> Result<Vec<ObjectReport>> {
 
         if let Some(dominator) = dominators.immediate_dominator(node_idx) {
             children.entry(dominator).or_insert_with(Vec::new).push(node_idx);
+        } else {
+            // Unreachable node — attach to SuperRoot so retained sizes are correct
+            children.entry(super_root).or_insert_with(Vec::new).push(node_idx);
         }
     }
 
@@ -1632,6 +1635,8 @@ pub fn calculate_dominators_with_state(graph: &HeapGraph) -> Result<(Vec<ObjectR
     log::info!("Dominator tree computed successfully");
 
     // Step 2: Build children map
+    // Nodes unreachable from SuperRoot (no immediate dominator) are attached
+    // directly to SuperRoot so their sizes are included in the retained total.
     let mut children_map: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
     for node_idx in petgraph.node_indices() {
         if node_idx == super_root {
@@ -1639,6 +1644,9 @@ pub fn calculate_dominators_with_state(graph: &HeapGraph) -> Result<(Vec<ObjectR
         }
         if let Some(dominator) = dominators.immediate_dominator(node_idx) {
             children_map.entry(dominator).or_insert_with(Vec::new).push(node_idx);
+        } else {
+            // Unreachable node — attach to SuperRoot so retained sizes are correct
+            children_map.entry(super_root).or_insert_with(Vec::new).push(node_idx);
         }
     }
 
@@ -1757,15 +1765,18 @@ pub fn calculate_dominators_with_state(graph: &HeapGraph) -> Result<(Vec<ObjectR
     log::info!("Computed class histogram: {} classes", class_histogram.len());
 
     // Step 7: Detect leak suspects
-    let total_heap_retained = retained_sizes.get(&super_root).copied().unwrap_or(0);
+    // Use total_heap_size from summary (sum of all shallow sizes) as the denominator
+    // for percentages, since it's always correct regardless of dominator tree coverage.
+    let summary = graph.summary();
+    let total_heap_size = summary.total_heap_size;
     let mut leak_suspects = Vec::new();
 
-    if total_heap_retained > 0 {
+    if total_heap_size > 0 {
         // Check dominator tree top-level children for individual objects retaining >10%
         if let Some(top_children) = children_map.get(&super_root) {
             for &child_idx in top_children {
                 let retained = retained_sizes.get(&child_idx).copied().unwrap_or(0);
-                let percentage = (retained as f64 / total_heap_retained as f64) * 100.0;
+                let percentage = (retained as f64 / total_heap_size as f64) * 100.0;
                 if percentage > 10.0 {
                     let (object_id, _, class_name) = node_data_map.get(&child_idx)
                         .cloned()
@@ -1789,7 +1800,7 @@ pub fn calculate_dominators_with_state(graph: &HeapGraph) -> Result<(Vec<ObjectR
 
         // Check for class groups collectively retaining >10%
         for entry in &class_histogram {
-            let percentage = (entry.retained_size as f64 / total_heap_retained as f64) * 100.0;
+            let percentage = (entry.retained_size as f64 / total_heap_size as f64) * 100.0;
             if percentage > 10.0 && entry.instance_count > 1 {
                 // Check if this class group wasn't already covered by individual suspects
                 let already_covered = leak_suspects.iter()
