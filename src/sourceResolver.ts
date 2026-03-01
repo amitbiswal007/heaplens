@@ -1,4 +1,11 @@
 import * as vscode from 'vscode';
+import type { DependencyResolver } from './dependencyResolver';
+
+let dependencyResolver: DependencyResolver | null = null;
+
+export function setDependencyResolver(resolver: DependencyResolver | null): void {
+    dependencyResolver = resolver;
+}
 
 const UNRESOLVABLE_PREFIXES = ['java.', 'javax.', 'sun.', 'com.sun.', 'jdk.'];
 
@@ -54,6 +61,10 @@ export async function resolveSource(className: string): Promise<vscode.Uri | nul
     const files = await vscode.workspace.findFiles(glob, '**/node_modules/**', 5);
 
     if (files.length === 0) {
+        // Tier 2: check dependency source JARs
+        if (dependencyResolver) {
+            return dependencyResolver.resolveFromDependencies(className);
+        }
         return null;
     }
 

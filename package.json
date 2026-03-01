@@ -85,6 +85,21 @@
           "type": "string",
           "default": "",
           "description": "Model name override (defaults to provider's recommended model)"
+        },
+        "heaplens.sourceResolution.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable resolving source code from Maven/Gradle dependency source JARs"
+        },
+        "heaplens.sourceResolution.mavenHome": {
+          "type": "string",
+          "default": "",
+          "description": "Custom Maven repository path (defaults to ~/.m2/repository)"
+        },
+        "heaplens.sourceResolution.gradleHome": {
+          "type": "string",
+          "default": "",
+          "description": "Custom Gradle cache path (defaults to ~/.gradle/caches/modules-2/files-2.1)"
         }
       }
     }

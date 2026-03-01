@@ -3,9 +3,12 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { HprofEditorProvider } from './hprofEditorProvider';
 import { registerChatParticipant } from './chatParticipant';
+import { DependencyResolver } from './dependencyResolver';
+import { setDependencyResolver } from './sourceResolver';
 
 let outputChannel: vscode.OutputChannel | null = null;
 let editorProvider: HprofEditorProvider | null = null;
+let depResolver: DependencyResolver | null = null;
 
 /**
  * Returns the path to the hprof-server binary.
@@ -40,6 +43,13 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Register chat participant for Copilot Chat integration
     registerChatParticipant(context, () => editorProvider?.getAnalysisData() ?? null);
+
+    // Set up dependency resolver for source code bridge Tier 2
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (workspaceFolder) {
+        depResolver = new DependencyResolver(workspaceFolder.uri.fsPath, outputChannel);
+        setDependencyResolver(depResolver);
+    }
 
     // Command: Analyze HPROF file (opens file picker, then opens as custom editor)
     context.subscriptions.push(
@@ -108,6 +118,9 @@ export function activate(context: vscode.ExtensionContext) {
     // Cleanup
     context.subscriptions.push({
         dispose: () => {
+            setDependencyResolver(null);
+            depResolver?.dispose();
+            depResolver = null;
             editorProvider?.dispose();
             editorProvider = null;
             outputChannel?.dispose();
@@ -117,6 +130,9 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {
+    setDependencyResolver(null);
+    depResolver?.dispose();
+    depResolver = null;
     editorProvider?.dispose();
     editorProvider = null;
     outputChannel?.dispose();
