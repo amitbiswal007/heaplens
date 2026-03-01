@@ -3,11 +3,13 @@ import * as vscode from 'vscode';
 /**
  * Returns the HTML content for the HeapLens tabbed webview.
  *
- * Four tabs:
+ * Six tabs:
  * 1. Overview — summary stats + top 10 objects table + pie chart
  * 2. Histogram — sortable class histogram table with search
  * 3. Dominator Tree — expandable tree with lazy drill-down + optional sunburst
  * 4. Leak Suspects — card layout with severity indicators
+ * 5. Source — browsable resolvable classes with source resolution status
+ * 6. AI Chat — LLM-powered heap analysis Q&A
  */
 export function getWebviewContent(_webview: vscode.Webview): string {
     const d3Uri = 'https://d3js.org/d3.v7.min.js';
@@ -330,18 +332,53 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         .source-toast {
             position: fixed;
             bottom: 20px;
-            right: 20px;
-            padding: 8px 16px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 10px 20px;
             background: var(--vscode-editorWidget-background);
-            border: 1px solid var(--vscode-panel-border);
-            border-radius: 4px;
+            border: 1px solid var(--vscode-editorWarning-foreground, #cca700);
+            border-radius: 6px;
             font-size: 12px;
             opacity: 0;
             transition: opacity 0.3s;
             z-index: 200;
             pointer-events: none;
+            max-width: 80%;
+            text-align: center;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
         }
         .source-toast.visible { opacity: 1; }
+
+        /* Source tab */
+        .source-status {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 6px;
+            vertical-align: middle;
+        }
+        .source-status.not-tried { background: var(--vscode-panel-border); }
+        .source-status.resolving { background: var(--vscode-focusBorder); animation: pulse 1s infinite; }
+        .source-status.found { background: var(--vscode-testing-iconPassed, #388a34); }
+        .source-status.not-found { background: var(--vscode-editorError-foreground); opacity: 0.5; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+        .source-view-btn {
+            padding: 3px 10px;
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 11px;
+        }
+        .source-view-btn:hover { background: var(--vscode-button-hoverBackground); }
+        .source-view-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .source-stats {
+            font-size: 12px;
+            opacity: 0.6;
+            margin-bottom: 12px;
+        }
     </style>
 </head>
 <body>
@@ -350,6 +387,7 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         <button class="tab-btn" data-tab="histogram">Histogram</button>
         <button class="tab-btn" data-tab="domtree">Dominator Tree</button>
         <button class="tab-btn" data-tab="leaks">Leak Suspects</button>
+        <button class="tab-btn" data-tab="source">Source</button>
         <button class="tab-btn" data-tab="chat">AI Chat</button>
     </div>
 
@@ -393,7 +431,14 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         <div id="leak-suspects"><div class="loading">Waiting for analysis...</div></div>
     </div>
 
-    <!-- Tab 5: AI Chat -->
+    <!-- Tab 5: Source -->
+    <div id="tab-source" class="tab-content">
+        <input type="text" class="search-box" id="source-search" placeholder="Filter by class name...">
+        <div class="source-stats" id="source-stats"></div>
+        <div id="source-table"><div class="loading">Waiting for analysis...</div></div>
+    </div>
+
+    <!-- Tab 6: AI Chat -->
     <div id="tab-chat" class="tab-content">
         <div class="chat-container">
             <div class="chat-messages" id="chat-messages">
@@ -423,6 +468,12 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         let histogramFilter = '';
         const depInfoCache = {};
 
+        // Source tab state
+        let sourceSortCol = 'retained_size';
+        let sourceSortAsc = false;
+        let sourceFilter = '';
+        const sourceStatusMap = {};
+
         // ---- Tab switching ----
         document.querySelectorAll('.tab-btn').forEach(btn => {
             btn.addEventListener('click', () => {
@@ -443,6 +494,7 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     renderHistogram(msg.classHistogram || []);
                     renderDominatorTree(msg.topLayers || []);
                     renderLeakSuspects(msg.leakSuspects || []);
+                    renderSourceTab(msg.classHistogram || []);
                     break;
                 case 'childrenResponse':
                     expandTreeNode(msg.objectId, msg.children);
@@ -453,10 +505,14 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     break;
                 case 'sourceNotFound':
                     showSourceToast(msg.className);
+                    sourceStatusMap[msg.className] = 'not-found';
+                    updateSourceRow(msg.className);
                     break;
                 case 'dependencyResolved':
                     depInfoCache[msg.className] = { tier: msg.tier, dependency: msg.dependency };
                     updateDependencyBadges(msg.className, msg.tier, msg.dependency);
+                    sourceStatusMap[msg.className] = 'found';
+                    updateSourceRow(msg.className);
                     break;
                 case 'error':
                     showError(msg.message);
@@ -504,10 +560,10 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         let toastTimer = null;
         function showSourceToast(className) {
             const toast = document.getElementById('source-toast');
-            toast.textContent = 'Source not found: ' + className;
+            toast.textContent = 'No source found for ' + className + '. Open a Java project with source files in this workspace.';
             toast.classList.add('visible');
             if (toastTimer) clearTimeout(toastTimer);
-            toastTimer = setTimeout(() => toast.classList.remove('visible'), 3000);
+            toastTimer = setTimeout(() => toast.classList.remove('visible'), 5000);
         }
 
         function makeBadgeHtml(tier, dep) {
@@ -780,7 +836,143 @@ export function getWebviewContent(_webview: vscode.Webview): string {
             if (analysisData) renderDominatorTree(analysisData.topLayers || []);
         });
 
-        // ---- Tab 5: AI Chat ----
+        // ---- Tab 5: Source ----
+        let sourceHistogram = [];
+
+        function renderSourceTab(histogram) {
+            sourceHistogram = histogram.filter(e => isResolvableClass(e.class_name));
+
+            // Deduplicate by class name (keep entry with largest retained_size)
+            const seen = {};
+            sourceHistogram = sourceHistogram.filter(e => {
+                if (seen[e.class_name]) return false;
+                seen[e.class_name] = true;
+                return true;
+            });
+
+            renderSourceTable();
+        }
+
+        function renderSourceTable() {
+            const container = document.getElementById('source-table');
+            let sorted = [...sourceHistogram];
+
+            sorted.sort((a, b) => {
+                const va = a[sourceSortCol], vb = b[sourceSortCol];
+                if (typeof va === 'string') return sourceSortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+                return sourceSortAsc ? va - vb : vb - va;
+            });
+
+            if (sourceFilter) {
+                const f = sourceFilter.toLowerCase();
+                sorted = sorted.filter(e => e.class_name.toLowerCase().includes(f));
+            }
+
+            // Update stats
+            const resolvedCount = sourceHistogram.filter(e => sourceStatusMap[e.class_name] === 'found').length;
+            document.getElementById('source-stats').textContent =
+                sorted.length + ' resolvable class' + (sorted.length !== 1 ? 'es' : '') +
+                ' \\u00b7 ' + resolvedCount + ' resolved';
+
+            const cols = [
+                { key: 'class_name', label: 'Class Name', cls: '' },
+                { key: 'instance_count', label: 'Instances', cls: 'right' },
+                { key: 'retained_size', label: 'Retained Size', cls: 'right' },
+                { key: '_status', label: 'Status', cls: '' },
+                { key: '_action', label: '', cls: '' }
+            ];
+
+            let html = '<table><thead><tr>';
+            cols.forEach(c => {
+                if (c.key.startsWith('_')) {
+                    html += '<th class="' + c.cls + '">' + c.label + '</th>';
+                } else {
+                    const arrow = sourceSortCol === c.key ? (sourceSortAsc ? ' \\u25B2' : ' \\u25BC') : '';
+                    html += '<th class="' + c.cls + '" data-source-sort="' + c.key + '">' + c.label + '<span class="sort-arrow">' + arrow + '</span></th>';
+                }
+            });
+            html += '</tr></thead><tbody>';
+
+            sorted.forEach(e => {
+                const cn = e.class_name;
+                const status = sourceStatusMap[cn] || 'not-tried';
+                const cachedDep = depInfoCache[cn];
+                const badge = cachedDep ? ' ' + makeBadgeHtml(cachedDep.tier, cachedDep.dependency) : '';
+                const statusLabel = status === 'not-tried' ? '' : status === 'resolving' ? 'resolving...' : status === 'found' ? 'found' : 'not found';
+                const btnDisabled = status === 'resolving' || status === 'found' ? ' disabled' : '';
+
+                html += '<tr data-source-class="' + escapeHtml(cn) + '">' +
+                    '<td>' + escapeHtml(cn) + '</td>' +
+                    '<td class="right">' + fmtNum(e.instance_count) + '</td>' +
+                    '<td class="right">' + fmt(e.retained_size) + '</td>' +
+                    '<td><span class="source-status ' + status + '"></span>' + statusLabel + badge + '</td>' +
+                    '<td><button class="source-view-btn" data-class="' + escapeHtml(cn) + '"' + btnDisabled + '>View Source</button></td>' +
+                    '</tr>';
+            });
+            html += '</tbody></table>';
+            container.innerHTML = html;
+
+            // Sort click handlers
+            container.querySelectorAll('th[data-source-sort]').forEach(th => {
+                th.addEventListener('click', () => {
+                    const col = th.dataset.sourceSort;
+                    if (sourceSortCol === col) sourceSortAsc = !sourceSortAsc;
+                    else { sourceSortCol = col; sourceSortAsc = false; }
+                    renderSourceTable();
+                });
+            });
+
+            // View Source click handlers
+            container.querySelectorAll('.source-view-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const cn = btn.dataset.class;
+                    if (sourceStatusMap[cn] === 'found') return;
+                    sourceStatusMap[cn] = 'resolving';
+                    updateSourceRow(cn);
+                    vscode.postMessage({ command: 'goToSource', className: cn });
+                });
+            });
+        }
+
+        function updateSourceRow(className) {
+            const row = document.querySelector('tr[data-source-class="' + className + '"]');
+            if (!row) return;
+
+            const status = sourceStatusMap[className] || 'not-tried';
+            const cachedDep = depInfoCache[className];
+            const badge = cachedDep ? ' ' + makeBadgeHtml(cachedDep.tier, cachedDep.dependency) : '';
+            const statusLabel = status === 'not-tried' ? '' : status === 'resolving' ? 'resolving...' : status === 'found' ? 'found' : 'not found';
+
+            // Update status cell (4th td)
+            const cells = row.querySelectorAll('td');
+            if (cells.length >= 4) {
+                cells[3].innerHTML = '<span class="source-status ' + status + '"></span>' + statusLabel + badge;
+            }
+
+            // Update button state (5th td)
+            if (cells.length >= 5) {
+                const btn = cells[4].querySelector('.source-view-btn');
+                if (btn) btn.disabled = (status === 'resolving' || status === 'found');
+            }
+
+            // Update resolved count in stats
+            const resolvedCount = sourceHistogram.filter(e => sourceStatusMap[e.class_name] === 'found').length;
+            const statsEl = document.getElementById('source-stats');
+            if (statsEl) {
+                const total = sourceFilter
+                    ? sourceHistogram.filter(e => e.class_name.toLowerCase().includes(sourceFilter.toLowerCase())).length
+                    : sourceHistogram.length;
+                statsEl.textContent = total + ' resolvable class' + (total !== 1 ? 'es' : '') +
+                    ' \\u00b7 ' + resolvedCount + ' resolved';
+            }
+        }
+
+        document.getElementById('source-search').addEventListener('input', (e) => {
+            sourceFilter = e.target.value;
+            if (analysisData) renderSourceTable();
+        });
+
+        // ---- Tab 6: AI Chat ----
         const chatMessages = document.getElementById('chat-messages');
         const chatInput = document.getElementById('chat-input');
         const chatSend = document.getElementById('chat-send');

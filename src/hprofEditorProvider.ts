@@ -116,7 +116,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                     this.handleChatMessage(message.text, webviewPanel);
                     break;
                 case 'goToSource':
-                    this.handleGoToSource(message.className, webviewPanel);
+                    await this.handleGoToSource(message.className, webviewPanel);
                     break;
                 case 'queryDependencyInfo': {
                     const cached = this.dependencyInfoCache.get(message.className);
@@ -325,26 +325,31 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
 
     private async handleGoToSource(className: string, webviewPanel: vscode.WebviewPanel): Promise<void> {
         this.outputChannel.appendLine(`[HeapLens] Go to source requested for: ${className}`);
-        const result = await resolveSource(className);
-        if (result) {
-            this.outputChannel.appendLine(`[HeapLens] Source found: tier=${result.tier}, uri=${result.uri.fsPath}`);
-            await vscode.window.showTextDocument(result.uri);
+        try {
+            const result = await resolveSource(className);
+            if (result) {
+                this.outputChannel.appendLine(`[HeapLens] Source found: tier=${result.tier}, uri=${result.uri.fsPath}`);
+                await vscode.window.showTextDocument(result.uri, { viewColumn: vscode.ViewColumn.Beside });
 
-            // Cache and send dependency info to webview
-            const info: { tier: string; dependency?: DependencyInfo } = { tier: result.tier };
-            if (result.dependency) {
-                info.dependency = result.dependency;
+                // Cache and send dependency info to webview
+                const info: { tier: string; dependency?: DependencyInfo } = { tier: result.tier };
+                if (result.dependency) {
+                    info.dependency = result.dependency;
+                }
+                this.dependencyInfoCache.set(className, info);
+
+                webviewPanel.webview.postMessage({
+                    command: 'dependencyResolved',
+                    className,
+                    tier: result.tier,
+                    dependency: result.dependency
+                });
+            } else {
+                this.outputChannel.appendLine(`[HeapLens] No source found for: ${className}`);
+                webviewPanel.webview.postMessage({ command: 'sourceNotFound', className });
             }
-            this.dependencyInfoCache.set(className, info);
-
-            webviewPanel.webview.postMessage({
-                command: 'dependencyResolved',
-                className,
-                tier: result.tier,
-                dependency: result.dependency
-            });
-        } else {
-            this.outputChannel.appendLine(`[HeapLens] No source found for: ${className}`);
+        } catch (error: any) {
+            this.outputChannel.appendLine(`[HeapLens] Go to source error for ${className}: ${error.message}`);
             webviewPanel.webview.postMessage({ command: 'sourceNotFound', className });
         }
     }

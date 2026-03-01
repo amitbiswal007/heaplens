@@ -48,8 +48,8 @@ export async function resolveSource(className: string): Promise<SourceResolution
         }
     }
 
-    // Strip array suffix (e.g., "com.example.Foo[]" → "com.example.Foo")
-    const baseClass = className.replace(/\[\]$/, '');
+    // Strip all array suffixes (e.g., "com.example.Foo[][]" → "com.example.Foo")
+    const baseClass = className.replace(/(\[\])+$/, '');
 
     // Strip inner class (e.g., "com.example.Outer$Inner" → "com.example.Outer")
     const outerClass = baseClass.includes('$') ? baseClass.substring(0, baseClass.indexOf('$')) : baseClass;
@@ -71,10 +71,14 @@ export async function resolveSource(className: string): Promise<SourceResolution
     if (files.length === 0) {
         // Tier 2/3: check dependency source JARs or decompile
         if (dependencyResolver) {
-            const depResult = await dependencyResolver.resolveFromDependencies(className);
-            if (depResult) {
-                console.log(`[HeapLens] Source resolved: tier=${depResult.tier}, class=${className}`);
-                return { uri: depResult.uri, tier: depResult.tier, dependency: depResult.dependency };
+            try {
+                const depResult = await dependencyResolver.resolveFromDependencies(className);
+                if (depResult) {
+                    console.log(`[HeapLens] Source resolved: tier=${depResult.tier}, class=${className}`);
+                    return { uri: depResult.uri, tier: depResult.tier, dependency: depResult.dependency };
+                }
+            } catch (err: any) {
+                console.log(`[HeapLens] Dependency resolution error for ${className}: ${err.message}`);
             }
         }
         console.log(`[HeapLens] No source found for ${className}`);
