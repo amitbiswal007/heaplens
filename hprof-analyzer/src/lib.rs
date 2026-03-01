@@ -474,19 +474,23 @@ pub enum NodeData {
     Root,
     /// A class definition.
     Class,
-    /// An object instance with its ID and size in bytes.
+    /// An object instance with its ID, size, and class name.
     Instance {
         /// The object ID from the HPROF file.
         id: u64,
-        /// The size of the instance in bytes (approximate, based on field data).
+        /// The size of the instance in bytes.
         size: u32,
+        /// The fully-qualified class name (e.g. "java.lang.String").
+        class_name: String,
     },
-    /// An array (object array or primitive array) with its ID and size in bytes.
+    /// An array (object array or primitive array) with its ID, size, and class name.
     Array {
         /// The array object ID from the HPROF file.
         id: u64,
         /// The size of the array in bytes.
         size: u32,
+        /// The array class name (e.g. "byte[]", "java.lang.Object[]").
+        class_name: String,
     },
 }
 
@@ -531,6 +535,8 @@ pub struct HeapGraph {
     id_to_node: HashMap<u64, NodeIndex>,
     /// The node index of the synthetic SuperRoot node.
     super_root: NodeIndex,
+    /// Heap summary statistics collected during graph building.
+    summary: HeapSummary,
 }
 
 impl HeapGraph {
@@ -562,6 +568,11 @@ impl HeapGraph {
     /// Returns the number of edges in the graph.
     pub fn edge_count(&self) -> usize {
         self.graph.edge_count()
+    }
+
+    /// Returns the heap summary statistics.
+    pub fn summary(&self) -> &HeapSummary {
+        &self.summary
     }
 }
 
@@ -624,7 +635,6 @@ impl HeapGraph {
 pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
     log::debug!("Starting graph construction ({} bytes)", data.len());
 
-    // Parse the HPROF file header
     let hprof = parse_hprof(data)
         .map_err(|e| anyhow::anyhow!("Failed to parse HPROF file: {:?}", e))?;
 
@@ -632,45 +642,114 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
     let mut graph = Graph::<NodeData, (), Directed>::new();
     let mut id_to_node: HashMap<u64, NodeIndex> = HashMap::new();
 
-    // Create the synthetic SuperRoot node
     let super_root = graph.add_node(NodeData::SuperRoot);
 
     // ============================================================================
-    // PASS 1: Identify all nodes and add them to the graph
+    // PASS 0a: Build string table (STRING_IN_UTF8 records)
     // ============================================================================
+    log::debug!("Pass 0a: Building string table...");
+    let mut string_table: HashMap<u64, String> = HashMap::new();
 
-    log::debug!("Pass 1: Identifying nodes...");
-
-    // First, collect all class IDs from LOAD_CLASS records
     for record_result in hprof.records_iter() {
         let record = record_result
             .map_err(|e| anyhow::anyhow!("Failed to parse record: {:?}", e))?;
+        if record.tag() == RecordTag::Utf8 {
+            if let Some(utf8_result) = record.as_utf_8() {
+                let utf8 = utf8_result
+                    .map_err(|e| anyhow::anyhow!("Failed to parse UTF8 string: {:?}", e))?;
+                let string_id = utf8.name_id().id();
+                let text = String::from_utf8_lossy(utf8.text()).to_string();
+                string_table.insert(string_id, text);
+            }
+        }
+    }
+    log::info!("Built string table: {} entries", string_table.len());
 
+    // ============================================================================
+    // PASS 0b: Build class name map (LOAD_CLASS records)
+    // ============================================================================
+    log::debug!("Pass 0b: Building class name map...");
+    let mut class_name_map: HashMap<u64, String> = HashMap::new();
+
+    for record_result in hprof.records_iter() {
+        let record = record_result
+            .map_err(|e| anyhow::anyhow!("Failed to parse record: {:?}", e))?;
         if record.tag() == RecordTag::LoadClass {
             if let Some(load_class_result) = record.as_load_class() {
                 let load_class = load_class_result
                     .map_err(|e| anyhow::anyhow!("Failed to parse LoadClass: {:?}", e))?;
-                
                 let class_obj_id = load_class.class_obj_id().id();
-                
-                // Add class node if not already present
+                let class_name_id = load_class.class_name_id().id();
+                if let Some(name) = string_table.get(&class_name_id) {
+                    // Convert JVM internal format to Java format: java/lang/String -> java.lang.String
+                    // Also handle array types: [B -> byte[], [Ljava/lang/Object; -> java.lang.Object[]
+                    let java_name = convert_jvm_class_name(name);
+                    class_name_map.insert(class_obj_id, java_name);
+                }
+            }
+        }
+    }
+    log::info!("Built class name map: {} entries", class_name_map.len());
+
+    // ============================================================================
+    // PASS 1: Identify all nodes and add them to the graph
+    // ============================================================================
+    log::debug!("Pass 1: Identifying nodes...");
+
+    let mut class_count = 0u64;
+
+    // Collect all class IDs from LOAD_CLASS records
+    for record_result in hprof.records_iter() {
+        let record = record_result
+            .map_err(|e| anyhow::anyhow!("Failed to parse record: {:?}", e))?;
+        if record.tag() == RecordTag::LoadClass {
+            if let Some(load_class_result) = record.as_load_class() {
+                let load_class = load_class_result
+                    .map_err(|e| anyhow::anyhow!("Failed to parse LoadClass: {:?}", e))?;
+                let class_obj_id = load_class.class_obj_id().id();
                 if !id_to_node.contains_key(&class_obj_id) {
                     let node_idx = graph.add_node(NodeData::Class);
                     id_to_node.insert(class_obj_id, node_idx);
-                    log::trace!("Added Class node: ID={}", class_obj_id);
+                    class_count += 1;
                 }
             }
         }
     }
 
-    log::info!("Found {} classes", id_to_node.len());
+    log::info!("Found {} classes", class_count);
 
     // Now scan heap dump segments for instances, arrays, and GC roots
-    let mut instance_count = 0;
-    let mut array_count = 0;
-    let mut gc_root_count = 0;
+    let mut instance_count = 0u64;
+    let mut array_count = 0u64;
+    let mut gc_root_count = 0u64;
     let mut gc_root_ids = Vec::new();
+    let mut total_shallow_size = 0u64;
 
+    // Also build a map of class_obj_id -> instance_size from Class sub-records
+    let mut class_instance_sizes: HashMap<u64, u32> = HashMap::new();
+
+    // First pass through heap dumps: collect class instance sizes
+    for record_result in hprof.records_iter() {
+        let record = record_result
+            .map_err(|e| anyhow::anyhow!("Failed to parse record: {:?}", e))?;
+        if record.tag() == RecordTag::HeapDump || record.tag() == RecordTag::HeapDumpSegment {
+            if let Some(heap_dump_result) = record.as_heap_dump_segment() {
+                let heap_dump = heap_dump_result
+                    .map_err(|e| anyhow::anyhow!("Failed to parse HeapDumpSegment: {:?}", e))?;
+                for sub_record_result in heap_dump.sub_records() {
+                    let sub_record = sub_record_result
+                        .map_err(|e| anyhow::anyhow!("Failed to parse sub-record: {:?}", e))?;
+                    if let jvm_hprof::heap_dump::SubRecord::Class(class) = sub_record {
+                        let obj_id = class.obj_id().id();
+                        let instance_size = class.instance_size_bytes();
+                        class_instance_sizes.insert(obj_id, instance_size);
+                    }
+                }
+            }
+        }
+    }
+
+    // Main heap dump scan
     for record_result in hprof.records_iter() {
         let record = record_result
             .map_err(|e| anyhow::anyhow!("Failed to parse record: {:?}", e))?;
@@ -685,61 +764,50 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
                         .map_err(|e| anyhow::anyhow!("Failed to parse sub-record: {:?}", e))?;
 
                     match sub_record {
-                        // GC Roots - collect their object IDs
+                        // GC Roots
                         jvm_hprof::heap_dump::SubRecord::GcRootUnknown(gc_root) => {
                             let obj_id = gc_root.obj_id().id();
                             gc_root_ids.push(obj_id);
                             gc_root_count += 1;
-                            
-                            // Add root node if the object exists
                             if !id_to_node.contains_key(&obj_id) {
                                 let node_idx = graph.add_node(NodeData::Root);
                                 id_to_node.insert(obj_id, node_idx);
-                                log::trace!("Added Root node for GC root: ID={}", obj_id);
                             }
                         }
                         jvm_hprof::heap_dump::SubRecord::GcRootJniGlobal(gc_root) => {
                             let obj_id = gc_root.obj_id().id();
                             gc_root_ids.push(obj_id);
                             gc_root_count += 1;
-                            
                             if !id_to_node.contains_key(&obj_id) {
                                 let node_idx = graph.add_node(NodeData::Root);
                                 id_to_node.insert(obj_id, node_idx);
-                                log::trace!("Added Root node for JNI Global: ID={}", obj_id);
                             }
                         }
                         jvm_hprof::heap_dump::SubRecord::GcRootJniLocalRef(gc_root) => {
                             let obj_id = gc_root.obj_id().id();
                             gc_root_ids.push(obj_id);
                             gc_root_count += 1;
-                            
                             if !id_to_node.contains_key(&obj_id) {
                                 let node_idx = graph.add_node(NodeData::Root);
                                 id_to_node.insert(obj_id, node_idx);
-                                log::trace!("Added Root node for JNI Local: ID={}", obj_id);
                             }
                         }
                         jvm_hprof::heap_dump::SubRecord::GcRootJavaStackFrame(gc_root) => {
                             let obj_id = gc_root.obj_id().id();
                             gc_root_ids.push(obj_id);
                             gc_root_count += 1;
-                            
                             if !id_to_node.contains_key(&obj_id) {
                                 let node_idx = graph.add_node(NodeData::Root);
                                 id_to_node.insert(obj_id, node_idx);
-                                log::trace!("Added Root node for Java Stack Frame: ID={}", obj_id);
                             }
                         }
                         jvm_hprof::heap_dump::SubRecord::GcRootSystemClass(gc_root) => {
                             let obj_id = gc_root.obj_id().id();
                             gc_root_ids.push(obj_id);
                             gc_root_count += 1;
-                            
                             if !id_to_node.contains_key(&obj_id) {
                                 let node_idx = graph.add_node(NodeData::Root);
                                 id_to_node.insert(obj_id, node_idx);
-                                log::trace!("Added Root node for System Class: ID={}", obj_id);
                             }
                         }
                         jvm_hprof::heap_dump::SubRecord::GcRootThreadObj(gc_root) => {
@@ -747,11 +815,9 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
                                 let obj_id = thread_obj_id.id();
                                 gc_root_ids.push(obj_id);
                                 gc_root_count += 1;
-                                
                                 if !id_to_node.contains_key(&obj_id) {
                                     let node_idx = graph.add_node(NodeData::Root);
                                     id_to_node.insert(obj_id, node_idx);
-                                    log::trace!("Added Root node for Thread: ID={}", obj_id);
                                 }
                             }
                         }
@@ -759,94 +825,131 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
                             let obj_id = gc_root.obj_id().id();
                             gc_root_ids.push(obj_id);
                             gc_root_count += 1;
-                            
                             if !id_to_node.contains_key(&obj_id) {
                                 let node_idx = graph.add_node(NodeData::Root);
                                 id_to_node.insert(obj_id, node_idx);
-                                log::trace!("Added Root node for Busy Monitor: ID={}", obj_id);
                             }
                         }
-                        // Instances
+                        // Instances — use class_obj_id to look up class name
                         jvm_hprof::heap_dump::SubRecord::Instance(instance) => {
                             let obj_id = instance.obj_id().id();
-                            let size = instance.fields().len() as u32; // Approximate size
-                            
+                            let class_obj_id = instance.class_obj_id().id();
+                            // Use instance_size from class definition if available, fall back to field data length
+                            let size = class_instance_sizes.get(&class_obj_id)
+                                .copied()
+                                .unwrap_or(instance.fields().len() as u32);
+                            let class_name = class_name_map.get(&class_obj_id)
+                                .cloned()
+                                .unwrap_or_else(|| format!("Unknown(0x{:x})", class_obj_id));
+
                             if !id_to_node.contains_key(&obj_id) {
-                                let node_idx = graph.add_node(NodeData::Instance { id: obj_id, size });
+                                let node_idx = graph.add_node(NodeData::Instance { id: obj_id, size, class_name });
                                 id_to_node.insert(obj_id, node_idx);
                                 instance_count += 1;
-                                log::trace!("Added Instance node: ID={}, size={}", obj_id, size);
+                                total_shallow_size += size as u64;
                             }
                         }
-                        // Arrays
+                        // Object Arrays
                         jvm_hprof::heap_dump::SubRecord::ObjectArray(array) => {
                             let obj_id = array.obj_id().id();
-                            // Calculate approximate size from array elements
-                            // ObjectArray stores object IDs, so we estimate size based on element count
-                            // Since element_count() is not available, we use elements() to count
+                            let array_class_obj_id = array.array_class_obj_id().id();
                             let id_size_bytes = match id_size {
                                 IdSize::U32 => 4,
                                 IdSize::U64 => 8,
                             };
-                            // Count elements by iterating (this is approximate)
-                            let mut element_count = 0;
+                            let mut element_count = 0u32;
                             for element_result in array.elements(id_size) {
                                 match element_result {
-                                    Ok(Some(_)) | Ok(None) => {
-                                        element_count += 1;
-                                    }
-                                    Err(_) => {
-                                        // Parse error, skip
-                                    }
+                                    Ok(Some(_)) | Ok(None) => element_count += 1,
+                                    Err(_) => {}
                                 }
                             }
-                            let size = (element_count * id_size_bytes) as u32;
-                            
+                            let size = element_count * id_size_bytes as u32;
+                            let class_name = class_name_map.get(&array_class_obj_id)
+                                .cloned()
+                                .unwrap_or_else(|| "Object[]".to_string());
+
                             if !id_to_node.contains_key(&obj_id) {
-                                let node_idx = graph.add_node(NodeData::Array { id: obj_id, size });
+                                let node_idx = graph.add_node(NodeData::Array { id: obj_id, size, class_name });
                                 id_to_node.insert(obj_id, node_idx);
                                 array_count += 1;
-                                log::trace!("Added ObjectArray node: ID={}, size={}", obj_id, size);
+                                total_shallow_size += size as u64;
                             }
                         }
+                        // Primitive Arrays
                         jvm_hprof::heap_dump::SubRecord::PrimitiveArray(array) => {
                             let obj_id = array.obj_id().id();
-                            // For PrimitiveArray, we can't easily get element count or type from the API
-                            // Use a default/approximate size - we'll use the raw data length if available
-                            // This is a simplified approach - in production, you'd want more accurate sizing
-                            // For now, use a placeholder size (will be refined when we have better API access)
-                            let size = 0u32; // Placeholder - actual size calculation requires API methods not available
-                            
+                            let prim_type = array.primitive_type();
+                            // Compute size by counting elements via typed iterators
+                            let (size, class_name) = match prim_type {
+                                jvm_hprof::heap_dump::PrimitiveArrayType::Boolean => {
+                                    let count = array.booleans().map_or(0u32, |iter| iter.count() as u32);
+                                    (count, "boolean[]".to_string())
+                                }
+                                jvm_hprof::heap_dump::PrimitiveArrayType::Byte => {
+                                    let count = array.bytes().map_or(0u32, |iter| iter.count() as u32);
+                                    (count, "byte[]".to_string())
+                                }
+                                jvm_hprof::heap_dump::PrimitiveArrayType::Char => {
+                                    let count = array.chars().map_or(0u32, |iter| iter.count() as u32);
+                                    (count * 2, "char[]".to_string())
+                                }
+                                jvm_hprof::heap_dump::PrimitiveArrayType::Short => {
+                                    let count = array.shorts().map_or(0u32, |iter| iter.count() as u32);
+                                    (count * 2, "short[]".to_string())
+                                }
+                                jvm_hprof::heap_dump::PrimitiveArrayType::Int => {
+                                    let count = array.ints().map_or(0u32, |iter| iter.count() as u32);
+                                    (count * 4, "int[]".to_string())
+                                }
+                                jvm_hprof::heap_dump::PrimitiveArrayType::Float => {
+                                    let count = array.floats().map_or(0u32, |iter| iter.count() as u32);
+                                    (count * 4, "float[]".to_string())
+                                }
+                                jvm_hprof::heap_dump::PrimitiveArrayType::Long => {
+                                    let count = array.longs().map_or(0u32, |iter| iter.count() as u32);
+                                    (count * 8, "long[]".to_string())
+                                }
+                                jvm_hprof::heap_dump::PrimitiveArrayType::Double => {
+                                    let count = array.doubles().map_or(0u32, |iter| iter.count() as u32);
+                                    (count * 8, "double[]".to_string())
+                                }
+                            };
+
                             if !id_to_node.contains_key(&obj_id) {
-                                let node_idx = graph.add_node(NodeData::Array { id: obj_id, size });
+                                let node_idx = graph.add_node(NodeData::Array { id: obj_id, size, class_name });
                                 id_to_node.insert(obj_id, node_idx);
                                 array_count += 1;
-                                log::trace!("Added PrimitiveArray node: ID={}, size={} (approximate)", obj_id, size);
+                                total_shallow_size += size as u64;
                             }
                         }
                         // Class definitions in heap dump
                         jvm_hprof::heap_dump::SubRecord::Class(class) => {
                             let obj_id = class.obj_id().id();
-                            
                             if !id_to_node.contains_key(&obj_id) {
                                 let node_idx = graph.add_node(NodeData::Class);
                                 id_to_node.insert(obj_id, node_idx);
-                                log::trace!("Added Class node from heap dump: ID={}", obj_id);
+                                class_count += 1;
                             }
                         }
-                        _ => {
-                            // Other sub-record types (GcRootNativeStack, GcRootThreadBlock, etc.)
-                            // are less common but could be handled here if needed
-                        }
+                        _ => {}
                     }
                 }
             }
         }
     }
 
+    let summary = HeapSummary {
+        total_heap_size: total_shallow_size,
+        total_instances: instance_count,
+        total_classes: class_count,
+        total_arrays: array_count,
+        total_gc_roots: gc_root_count,
+    };
+
     log::info!(
         "Pass 1 complete: {} classes, {} instances, {} arrays, {} GC roots",
-        id_to_node.len() - instance_count - array_count - gc_root_count,
+        class_count,
         instance_count,
         array_count,
         gc_root_count
@@ -993,7 +1096,45 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
         graph,
         id_to_node,
         super_root,
+        summary,
     })
+}
+
+/// Converts a JVM internal class name to Java format.
+///
+/// Examples:
+/// - `java/lang/String` → `java.lang.String`
+/// - `[B` → `byte[]`
+/// - `[Ljava/lang/Object;` → `java.lang.Object[]`
+/// - `[[I` → `int[][]`
+fn convert_jvm_class_name(name: &str) -> String {
+    if name.starts_with('[') {
+        // Array type
+        let mut depth = 0;
+        let mut chars = name.chars();
+        while chars.as_str().starts_with('[') {
+            depth += 1;
+            chars.next();
+        }
+        let rest = chars.as_str();
+        let base = match rest {
+            "B" => "byte".to_string(),
+            "C" => "char".to_string(),
+            "D" => "double".to_string(),
+            "F" => "float".to_string(),
+            "I" => "int".to_string(),
+            "J" => "long".to_string(),
+            "S" => "short".to_string(),
+            "Z" => "boolean".to_string(),
+            s if s.starts_with('L') && s.ends_with(';') => {
+                s[1..s.len()-1].replace('/', ".")
+            }
+            other => other.replace('/', "."),
+        };
+        format!("{}{}", base, "[]".repeat(depth))
+    } else {
+        name.replace('/', ".")
+    }
 }
 
 /// Helper function to extract object references from byte data.
@@ -1055,6 +1196,8 @@ pub struct ObjectReport {
     pub object_id: u64,
     /// The node type (SuperRoot, Root, Class, Instance, or Array).
     pub node_type: String,
+    /// The fully-qualified class name (empty for SuperRoot/Root/Class nodes).
+    pub class_name: String,
     /// The shallow size of this object in bytes.
     pub shallow_size: u64,
     /// The retained size of this object in bytes.
@@ -1070,6 +1213,7 @@ impl ObjectReport {
     pub fn new(
         object_id: u64,
         node_type: String,
+        class_name: String,
         shallow_size: u64,
         retained_size: u64,
         node_index: NodeIndex,
@@ -1077,6 +1221,7 @@ impl ObjectReport {
         Self {
             object_id,
             node_type,
+            class_name,
             shallow_size,
             retained_size,
             node_index,
@@ -1200,51 +1345,34 @@ pub fn calculate_dominators(graph: &HeapGraph) -> Result<Vec<ObjectReport>> {
         shallow_sizes.insert(node_idx, shallow_size);
     }
 
-    log::debug!("Calculated shallow sizes for {} nodes", shallow_sizes.len());
-
-    // Step 4: Calculate retained sizes using iterative bottom-up traversal
-    // Process nodes level by level from leaves (nodes with no children) to root
-    // This ensures all children are processed before their parents
-
+    // Step 4: Calculate retained sizes bottom-up
     let mut retained_sizes: HashMap<NodeIndex, u64> = HashMap::new();
     let mut processed = std::collections::HashSet::new();
 
-    // Initialize all nodes with their shallow sizes
     for node_idx in petgraph.node_indices() {
         let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
         retained_sizes.insert(node_idx, shallow);
     }
 
-    // Process nodes bottom-up: repeatedly process nodes whose children are all processed
     let mut changed = true;
     while changed {
         changed = false;
-
         for node_idx in petgraph.node_indices() {
             if processed.contains(&node_idx) {
                 continue;
             }
-
-            // Check if all children in the dominator tree are processed
             let all_children_processed = children
                 .get(&node_idx)
                 .map_or(true, |node_children| {
                     node_children.iter().all(|&c| processed.contains(&c))
                 });
-
             if all_children_processed {
-                // Start with shallow size
                 let mut retained = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
-
-                // Add retained sizes of all children in the dominator tree
                 if let Some(node_children) = children.get(&node_idx) {
                     for &child in node_children {
-                        let child_retained = retained_sizes.get(&child).copied().unwrap_or(0);
-                        retained += child_retained;
+                        retained += retained_sizes.get(&child).copied().unwrap_or(0);
                     }
                 }
-
-                // Update retained size
                 retained_sizes.insert(node_idx, retained);
                 processed.insert(node_idx);
                 changed = true;
@@ -1252,16 +1380,12 @@ pub fn calculate_dominators(graph: &HeapGraph) -> Result<Vec<ObjectReport>> {
         }
     }
 
-    // Handle any remaining nodes (shouldn't happen in a valid dominator tree, but be safe)
     for node_idx in petgraph.node_indices() {
         if !processed.contains(&node_idx) {
             let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
             retained_sizes.insert(node_idx, shallow);
-            log::warn!("Node {:?} was not processed in bottom-up traversal", node_idx);
         }
     }
-
-    log::info!("Calculated retained sizes for {} nodes", retained_sizes.len());
 
     // Step 5: Build ObjectReport for all nodes
     let mut reports: Vec<ObjectReport> = Vec::new();
@@ -1271,38 +1395,71 @@ pub fn calculate_dominators(graph: &HeapGraph) -> Result<Vec<ObjectReport>> {
         let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
         let retained = retained_sizes.get(&node_idx).copied().unwrap_or(0);
 
-        let (object_id, node_type) = match node_data {
-            NodeData::SuperRoot => (0, "SuperRoot".to_string()),
-            NodeData::Root => (0, "Root".to_string()),
-            NodeData::Class => (0, "Class".to_string()),
-            NodeData::Instance { id, .. } => (*id, "Instance".to_string()),
-            NodeData::Array { id, .. } => (*id, "Array".to_string()),
+        let (object_id, node_type, class_name) = match node_data {
+            NodeData::SuperRoot => (0, "SuperRoot".to_string(), String::new()),
+            NodeData::Root => (0, "Root".to_string(), String::new()),
+            NodeData::Class => (0, "Class".to_string(), String::new()),
+            NodeData::Instance { id, class_name, .. } => (*id, "Instance".to_string(), class_name.clone()),
+            NodeData::Array { id, class_name, .. } => (*id, "Array".to_string(), class_name.clone()),
         };
 
         reports.push(ObjectReport::new(
             object_id,
             node_type,
+            class_name,
             shallow,
             retained,
             node_idx,
         ));
     }
 
-    // Step 6: Sort by retained size (descending) and take top 50
     reports.sort();
     let top_50: Vec<ObjectReport> = reports.into_iter().take(50).collect();
 
-    if let Some(top_object) = top_50.first() {
-        log::info!(
-            "Top object: ID={}, Type={}, Retained={} bytes ({:.2} MB)",
-            top_object.object_id,
-            top_object.node_type,
-            top_object.retained_size,
-            top_object.retained_size as f64 / (1024.0 * 1024.0)
-        );
-    }
-
     Ok(top_50)
+}
+
+/// Entry in the class histogram showing aggregate stats per class.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ClassHistogramEntry {
+    /// The fully-qualified class name.
+    pub class_name: String,
+    /// Number of instances of this class.
+    pub instance_count: u64,
+    /// Total shallow size of all instances of this class.
+    pub shallow_size: u64,
+    /// Total retained size of all instances of this class.
+    pub retained_size: u64,
+}
+
+/// A suspected memory leak.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct LeakSuspect {
+    /// The class name of the suspected leaking object.
+    pub class_name: String,
+    /// The HPROF object ID.
+    pub object_id: u64,
+    /// The retained size of this object.
+    pub retained_size: u64,
+    /// Percentage of total heap retained by this object.
+    pub retained_percentage: f64,
+    /// Human-readable description of why this is a suspect.
+    pub description: String,
+}
+
+/// Summary statistics for the entire heap dump.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HeapSummary {
+    /// Total heap size in bytes (sum of all shallow sizes).
+    pub total_heap_size: u64,
+    /// Total number of object instances.
+    pub total_instances: u64,
+    /// Total number of classes.
+    pub total_classes: u64,
+    /// Total number of arrays.
+    pub total_arrays: u64,
+    /// Total number of GC roots.
+    pub total_gc_roots: u64,
 }
 
 /// Analysis state containing the dominator tree information.
@@ -1325,8 +1482,14 @@ pub struct AnalysisState {
     pub id_to_node: HashMap<u64, NodeIndex>,
     /// The super root node index.
     pub super_root: NodeIndex,
-    /// Mapping from node index to node data (for querying node info).
-    pub node_data_map: HashMap<NodeIndex, (u64, String)>,
+    /// Mapping from node index to (object_id, node_type, class_name).
+    pub node_data_map: HashMap<NodeIndex, (u64, String, String)>,
+    /// Class histogram entries sorted by retained size.
+    pub class_histogram: Vec<ClassHistogramEntry>,
+    /// Detected leak suspects.
+    pub leak_suspects: Vec<LeakSuspect>,
+    /// Heap summary statistics.
+    pub summary: HeapSummary,
 }
 
 impl AnalysisState {
@@ -1342,10 +1505,8 @@ impl AnalysisState {
     pub fn get_children(&self, object_id: u64) -> Option<Vec<ObjectReport>> {
         // Find the node index for this object ID
         let node_idx = if object_id == 0 {
-            // For SuperRoot, use the super_root node
             self.super_root
         } else {
-            // Look up by object ID
             *self.id_to_node.get(&object_id)?
         };
 
@@ -1356,10 +1517,10 @@ impl AnalysisState {
         let mut children_reports = Vec::new();
 
         for &child_idx in children_indices {
-            let (child_object_id, node_type) = self.node_data_map.get(&child_idx)
+            let (child_object_id, node_type, class_name) = self.node_data_map.get(&child_idx)
                 .cloned()
-                .unwrap_or((0, "Unknown".to_string()));
-            
+                .unwrap_or((0, "Unknown".to_string(), String::new()));
+
             let shallow = self.shallow_sizes.get(&child_idx).copied().unwrap_or(0);
             let retained = self.retained_sizes.get(&child_idx).copied().unwrap_or(0);
 
@@ -1371,18 +1532,17 @@ impl AnalysisState {
             children_reports.push(ObjectReport::new(
                 child_object_id,
                 node_type,
+                class_name,
                 shallow,
                 retained,
                 child_idx,
             ));
         }
 
-        // If no meaningful children found, return None
         if children_reports.is_empty() {
             return None;
         }
 
-        // Sort by retained size (descending)
         children_reports.sort();
         Some(children_reports)
     }
@@ -1401,8 +1561,7 @@ impl AnalysisState {
         let mut result = Vec::new();
         let mut visited = std::collections::HashSet::new();
         let mut queue = std::collections::VecDeque::new();
-        
-        // Start from SuperRoot
+
         queue.push_back((self.super_root, 0));
         visited.insert(self.super_root);
 
@@ -1411,16 +1570,14 @@ impl AnalysisState {
                 break;
             }
 
-            let (object_id, node_type) = self.node_data_map.get(&node_idx)
+            let (object_id, node_type, class_name) = self.node_data_map.get(&node_idx)
                 .cloned()
-                .unwrap_or((0, "Unknown".to_string()));
-            
+                .unwrap_or((0, "Unknown".to_string(), String::new()));
+
             let shallow = self.shallow_sizes.get(&node_idx).copied().unwrap_or(0);
             let retained = self.retained_sizes.get(&node_idx).copied().unwrap_or(0);
 
-            // Filter out Class nodes and nodes with zero retained size (except SuperRoot)
             if node_type == "Class" || (retained == 0 && node_type != "SuperRoot") {
-                // Still process children, but skip this node
                 if depth + 1 < max_depth {
                     if let Some(children) = self.children_map.get(&node_idx) {
                         for &child_idx in children {
@@ -1437,12 +1594,12 @@ impl AnalysisState {
             result.push(ObjectReport::new(
                 object_id,
                 node_type,
+                class_name,
                 shallow,
                 retained,
                 node_idx,
             ));
 
-            // Add children to queue for next level
             if depth + 1 < max_depth {
                 if let Some(children) = self.children_map.get(&node_idx) {
                     for &child_idx in children {
@@ -1455,16 +1612,15 @@ impl AnalysisState {
             }
         }
 
-        // Sort by retained size (descending)
         result.sort();
         result
     }
 }
 
 /// Calculates dominators and returns both top objects and analysis state.
-/// 
+///
 /// This is similar to `calculate_dominators` but also returns the analysis state
-/// needed for lazy loading queries.
+/// needed for lazy loading queries, plus class histogram and leak suspects.
 pub fn calculate_dominators_with_state(graph: &HeapGraph) -> Result<(Vec<ObjectReport>, AnalysisState)> {
     log::debug!("Calculating dominators with state for {} nodes", graph.node_count());
 
@@ -1473,27 +1629,21 @@ pub fn calculate_dominators_with_state(graph: &HeapGraph) -> Result<(Vec<ObjectR
 
     // Step 1: Compute dominator tree
     let dominators = dominators::simple_fast(petgraph, super_root);
-
     log::info!("Dominator tree computed successfully");
 
     // Step 2: Build children map
     let mut children_map: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
-
     for node_idx in petgraph.node_indices() {
         if node_idx == super_root {
             continue;
         }
-
         if let Some(dominator) = dominators.immediate_dominator(node_idx) {
             children_map.entry(dominator).or_insert_with(Vec::new).push(node_idx);
         }
     }
 
-    log::debug!("Built children map: {} nodes have children", children_map.len());
-
     // Step 3: Calculate shallow sizes
     let mut shallow_sizes: HashMap<NodeIndex, u64> = HashMap::new();
-
     for node_idx in petgraph.node_indices() {
         let node_data = &petgraph[node_idx];
         let shallow_size = match node_data {
@@ -1504,42 +1654,34 @@ pub fn calculate_dominators_with_state(graph: &HeapGraph) -> Result<(Vec<ObjectR
         shallow_sizes.insert(node_idx, shallow_size);
     }
 
-    // Step 4: Calculate retained sizes
+    // Step 4: Calculate retained sizes bottom-up
     let mut retained_sizes: HashMap<NodeIndex, u64> = HashMap::new();
     let mut processed = std::collections::HashSet::new();
 
-    // Initialize all nodes with their shallow sizes
     for node_idx in petgraph.node_indices() {
         let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
         retained_sizes.insert(node_idx, shallow);
     }
 
-    // Process nodes bottom-up
     let mut changed = true;
     while changed {
         changed = false;
-
         for node_idx in petgraph.node_indices() {
             if processed.contains(&node_idx) {
                 continue;
             }
-
             let all_children_processed = children_map
                 .get(&node_idx)
                 .map_or(true, |node_children| {
                     node_children.iter().all(|&c| processed.contains(&c))
                 });
-
             if all_children_processed {
                 let mut retained = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
-
                 if let Some(node_children) = children_map.get(&node_idx) {
                     for &child in node_children {
-                        let child_retained = retained_sizes.get(&child).copied().unwrap_or(0);
-                        retained += child_retained;
+                        retained += retained_sizes.get(&child).copied().unwrap_or(0);
                     }
                 }
-
                 retained_sizes.insert(node_idx, retained);
                 processed.insert(node_idx);
                 changed = true;
@@ -1547,7 +1689,6 @@ pub fn calculate_dominators_with_state(graph: &HeapGraph) -> Result<(Vec<ObjectR
         }
     }
 
-    // Handle any remaining nodes
     for node_idx in petgraph.node_indices() {
         if !processed.contains(&node_idx) {
             let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
@@ -1557,7 +1698,8 @@ pub fn calculate_dominators_with_state(graph: &HeapGraph) -> Result<(Vec<ObjectR
 
     log::info!("Calculated retained sizes for {} nodes", retained_sizes.len());
 
-    // Step 5: Build ObjectReport for all nodes
+    // Step 5: Build node_data_map and ObjectReports
+    let mut node_data_map: HashMap<NodeIndex, (u64, String, String)> = HashMap::new();
     let mut reports: Vec<ObjectReport> = Vec::new();
 
     for node_idx in petgraph.node_indices() {
@@ -1565,43 +1707,117 @@ pub fn calculate_dominators_with_state(graph: &HeapGraph) -> Result<(Vec<ObjectR
         let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
         let retained = retained_sizes.get(&node_idx).copied().unwrap_or(0);
 
-        let (object_id, node_type) = match node_data {
-            NodeData::SuperRoot => (0, "SuperRoot".to_string()),
-            NodeData::Root => (0, "Root".to_string()),
-            NodeData::Class => (0, "Class".to_string()),
-            NodeData::Instance { id, .. } => (*id, "Instance".to_string()),
-            NodeData::Array { id, .. } => (*id, "Array".to_string()),
+        let (object_id, node_type, class_name) = match node_data {
+            NodeData::SuperRoot => (0, "SuperRoot".to_string(), String::new()),
+            NodeData::Root => (0, "Root".to_string(), String::new()),
+            NodeData::Class => (0, "Class".to_string(), String::new()),
+            NodeData::Instance { id, class_name, .. } => (*id, "Instance".to_string(), class_name.clone()),
+            NodeData::Array { id, class_name, .. } => (*id, "Array".to_string(), class_name.clone()),
         };
+
+        node_data_map.insert(node_idx, (object_id, node_type.clone(), class_name.clone()));
 
         reports.push(ObjectReport::new(
             object_id,
             node_type,
+            class_name,
             shallow,
             retained,
             node_idx,
         ));
     }
 
-    // Step 6: Sort and take top 50
     reports.sort();
     let top_50: Vec<ObjectReport> = reports.into_iter().take(50).collect();
 
-    // Build node data map for quick lookups
-    let mut node_data_map: HashMap<NodeIndex, (u64, String)> = HashMap::new();
+    // Step 6: Compute class histogram
+    let mut histogram_map: HashMap<String, (u64, u64, u64)> = HashMap::new(); // (count, shallow, retained)
     for node_idx in petgraph.node_indices() {
         let node_data = &petgraph[node_idx];
-        let (object_id, node_type) = match node_data {
-            NodeData::SuperRoot => (0, "SuperRoot".to_string()),
-            NodeData::Root => (0, "Root".to_string()),
-            NodeData::Class => (0, "Class".to_string()),
-            NodeData::Instance { id, .. } => (*id, "Instance".to_string()),
-            NodeData::Array { id, .. } => (*id, "Array".to_string()),
-        };
-        node_data_map.insert(node_idx, (object_id, node_type));
+        match node_data {
+            NodeData::Instance { class_name, .. } | NodeData::Array { class_name, .. } => {
+                let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
+                let retained = retained_sizes.get(&node_idx).copied().unwrap_or(0);
+                let entry = histogram_map.entry(class_name.clone()).or_insert((0, 0, 0));
+                entry.0 += 1;
+                entry.1 += shallow;
+                entry.2 += retained;
+            }
+            _ => {}
+        }
     }
 
-    // Build analysis state
+    let mut class_histogram: Vec<ClassHistogramEntry> = histogram_map
+        .into_iter()
+        .map(|(class_name, (instance_count, shallow_size, retained_size))| {
+            ClassHistogramEntry { class_name, instance_count, shallow_size, retained_size }
+        })
+        .collect();
+    class_histogram.sort_by(|a, b| b.retained_size.cmp(&a.retained_size));
+    log::info!("Computed class histogram: {} classes", class_histogram.len());
+
+    // Step 7: Detect leak suspects
+    let total_heap_retained = retained_sizes.get(&super_root).copied().unwrap_or(0);
+    let mut leak_suspects = Vec::new();
+
+    if total_heap_retained > 0 {
+        // Check dominator tree top-level children for individual objects retaining >10%
+        if let Some(top_children) = children_map.get(&super_root) {
+            for &child_idx in top_children {
+                let retained = retained_sizes.get(&child_idx).copied().unwrap_or(0);
+                let percentage = (retained as f64 / total_heap_retained as f64) * 100.0;
+                if percentage > 10.0 {
+                    let (object_id, _, class_name) = node_data_map.get(&child_idx)
+                        .cloned()
+                        .unwrap_or((0, String::new(), String::new()));
+                    let display_name = if class_name.is_empty() { "Unknown".to_string() } else { class_name.clone() };
+                    leak_suspects.push(LeakSuspect {
+                        class_name: display_name.clone(),
+                        object_id,
+                        retained_size: retained,
+                        retained_percentage: percentage,
+                        description: format!(
+                            "Single {} instance retains {:.1}% of total heap ({:.2} MB)",
+                            display_name,
+                            percentage,
+                            retained as f64 / (1024.0 * 1024.0)
+                        ),
+                    });
+                }
+            }
+        }
+
+        // Check for class groups collectively retaining >10%
+        for entry in &class_histogram {
+            let percentage = (entry.retained_size as f64 / total_heap_retained as f64) * 100.0;
+            if percentage > 10.0 && entry.instance_count > 1 {
+                // Check if this class group wasn't already covered by individual suspects
+                let already_covered = leak_suspects.iter()
+                    .any(|s| s.class_name == entry.class_name && s.retained_percentage > percentage * 0.5);
+                if !already_covered {
+                    leak_suspects.push(LeakSuspect {
+                        class_name: entry.class_name.clone(),
+                        object_id: 0,
+                        retained_size: entry.retained_size,
+                        retained_percentage: percentage,
+                        description: format!(
+                            "{} instances of {} collectively retain {:.1}% of total heap ({:.2} MB)",
+                            entry.instance_count,
+                            entry.class_name,
+                            percentage,
+                            entry.retained_size as f64 / (1024.0 * 1024.0)
+                        ),
+                    });
+                }
+            }
+        }
+
+        leak_suspects.sort_by(|a, b| b.retained_percentage.partial_cmp(&a.retained_percentage).unwrap_or(std::cmp::Ordering::Equal));
+    }
+    log::info!("Detected {} leak suspects", leak_suspects.len());
+
     let id_to_node = graph.id_to_node().clone();
+    let summary = graph.summary().clone();
 
     let state = AnalysisState {
         children_map,
@@ -1610,6 +1826,9 @@ pub fn calculate_dominators_with_state(graph: &HeapGraph) -> Result<(Vec<ObjectR
         id_to_node,
         super_root: graph.super_root(),
         node_data_map,
+        class_histogram,
+        leak_suspects,
+        summary,
     };
 
     Ok((top_50, state))
@@ -1654,7 +1873,7 @@ mod tests {
         assert_eq!(&mmap[..], test_data);
 
         // Verify we can read specific bytes
-        assert_eq!(&mmap[0..17], b"JAVA PROFILE 1.0.2");
+        assert_eq!(&mmap[0..18], b"JAVA PROFILE 1.0.2");
 
         log::info!("Successfully mapped and verified {} bytes", mmap.len());
     }

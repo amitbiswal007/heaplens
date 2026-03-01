@@ -52,13 +52,12 @@ interface PendingRequest {
  * - Implements sendRequest that returns a Promise resolving when the corresponding ID is received
  */
 export class RustClient {
-    private requestId: number = 0;
+    private requestId = 0;
     private pendingRequests: Map<number, PendingRequest> = new Map();
     private notificationHandlers: Map<string, (params: any) => void> = new Map();
     private rl: readline.Interface;
     private process: ChildProcess;
-    private isShutdown: boolean = false;
-    private buffer: string = '';
+    private isShutdown = false;
     public onStderr?: (message: string) => void;
 
     /**

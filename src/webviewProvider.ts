@@ -1,235 +1,196 @@
 import * as vscode from 'vscode';
-import { RustClient } from './rustClient';
 
 /**
- * Provider for the heap analysis webview.
- * 
- * This provider creates and manages the webview panel that displays
- * the Sunburst chart visualization of the heap.
+ * Returns the HTML content for the HeapLens tabbed webview.
+ *
+ * Four tabs:
+ * 1. Overview — summary stats + top 10 objects table + pie chart
+ * 2. Histogram — sortable class histogram table with search
+ * 3. Dominator Tree — expandable tree with lazy drill-down + optional sunburst
+ * 4. Leak Suspects — card layout with severity indicators
  */
-export class HeapAnalysisWebviewProvider {
-    private static readonly viewType = 'heapAnalysis';
-    private static currentPanel: vscode.WebviewPanel | undefined = undefined;
+export function getWebviewContent(_webview: vscode.Webview): string {
+    const d3Uri = 'https://d3js.org/d3.v7.min.js';
 
-    /**
-     * Creates or reveals the webview panel.
-     */
-    public static createOrShow(
-        extensionUri: vscode.Uri,
-        rustClient: RustClient,
-        hprofPath: string
-    ): void {
-        const column = vscode.window.activeTextEditor
-            ? vscode.window.activeTextEditor.viewColumn
-            : undefined;
-
-        // If we already have a panel, show it
-        if (HeapAnalysisWebviewProvider.currentPanel) {
-            HeapAnalysisWebviewProvider.currentPanel.reveal(column);
-            return;
-        }
-
-        // Otherwise, create a new panel
-        const panel = vscode.window.createWebviewPanel(
-            HeapAnalysisWebviewProvider.viewType,
-            'Heap Analysis',
-            column || vscode.ViewColumn.One,
-            {
-                enableScripts: true,
-                retainContextWhenHidden: true,
-                localResourceRoots: [
-                    vscode.Uri.joinPath(extensionUri, 'media')
-                ]
-            }
-        );
-
-        HeapAnalysisWebviewProvider.currentPanel = panel;
-
-        // Set the webview's initial html content
-        const htmlContent = HeapAnalysisWebviewProvider.getWebviewContent(
-            panel.webview,
-            extensionUri
-        );
-        panel.webview.html = htmlContent;
-        
-        // Log that webview was created
-        console.log('[WebviewProvider] Webview panel created and HTML set');
-
-        // Handle messages from the webview
-        panel.webview.onDidReceiveMessage(
-            async (message) => {
-                console.log(`[WebviewProvider] Received message: ${message.command}`);
-                switch (message.command) {
-                    case 'getChildren':
-                        try {
-                            const children = await rustClient.sendRequest('get_children', {
-                                path: hprofPath,
-                                object_id: message.objectId
-                            });
-                            
-                            // Check if children is an array and has items
-                            if (Array.isArray(children) && children.length > 0) {
-                                panel.webview.postMessage({
-                                    command: 'childrenResponse',
-                                    objectId: message.objectId,
-                                    children: children
-                                });
-                            } else {
-                                // No children found - show a message instead of error
-                                panel.webview.postMessage({
-                                    command: 'noChildren',
-                                    objectId: message.objectId,
-                                    message: 'This object has no children in the dominator tree'
-                                });
-                            }
-                        } catch (error: any) {
-                            console.error(`[WebviewProvider] Error getting children:`, error);
-                            // Check if it's a "not found" error
-                            if (error.message && error.message.includes('not found')) {
-                                panel.webview.postMessage({
-                                    command: 'noChildren',
-                                    objectId: message.objectId,
-                                    message: 'This object has no children or was not found'
-                                });
-                            } else {
-                                panel.webview.postMessage({
-                                    command: 'error',
-                                    message: error.message || String(error)
-                                });
-                            }
-                        }
-                        break;
-                    case 'alert':
-                        vscode.window.showErrorMessage(message.text);
-                        break;
-                    case 'ready':
-                        // Webview is ready, can send data now
-                        console.log('[WebviewProvider] Webview is ready');
-                        break;
-                }
-            },
-            undefined,
-            []
-        );
-
-        // Clean up when the panel is disposed
-        panel.onDidDispose(
-            () => {
-                HeapAnalysisWebviewProvider.currentPanel = undefined;
-            },
-            null,
-            []
-        );
-        
-        // Add command to open webview developer tools (for debugging)
-        // Note: This requires VS Code API that may not be available in all versions
-        // Users can also right-click the webview and select "Open Developer Tools"
-    }
-
-    /**
-     * Updates the webview with initial analysis data.
-     */
-    public static updateWithData(topLayers: any[]): void {
-        if (HeapAnalysisWebviewProvider.currentPanel) {
-            console.log(`[WebviewProvider] Sending ${topLayers.length} items to webview`);
-            
-            // Wait a bit longer to ensure webview is fully initialized
-            setTimeout(() => {
-                if (HeapAnalysisWebviewProvider.currentPanel) {
-                    try {
-                        HeapAnalysisWebviewProvider.currentPanel.webview.postMessage({
-                            command: 'updateData',
-                            data: topLayers
-                        });
-                        console.log('[WebviewProvider] Message sent successfully');
-                    } catch (error: any) {
-                        console.error('[WebviewProvider] Error sending message:', error);
-                    }
-                }
-            }, 1000); // Wait 1 second for webview to be ready
-        } else {
-            console.error('[WebviewProvider] No current panel to update');
-        }
-    }
-
-    /**
-     * Gets the HTML content for the webview.
-     */
-    private static getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): string {
-        // Get the URI for D3.js from CDN
-        const d3Uri = 'https://d3js.org/d3.v7.min.js';
-
-        return `<!DOCTYPE html>
+    return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https://d3js.org https://unpkg.com; style-src 'unsafe-inline';">
-    <title>Heap Analysis - Sunburst Chart</title>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https://d3js.org; style-src 'unsafe-inline';">
+    <title>HeapLens</title>
     <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-            font-family: var(--vscode-font-family);
+            font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, sans-serif);
             color: var(--vscode-foreground);
-            background-color: var(--vscode-editor-background);
-            margin: 0;
-            padding: 20px;
-            overflow: hidden;
-        }
-        #debug {
-            position: fixed;
-            top: 10px;
-            right: 10px;
             background: var(--vscode-editor-background);
-            border: 1px solid var(--vscode-panel-border);
-            padding: 10px;
-            font-size: 11px;
-            max-width: 300px;
-            z-index: 1000;
+            overflow-x: hidden;
         }
-        #chart-container {
-            width: 100%;
-            height: calc(100vh - 100px);
+
+        /* Tab bar */
+        .tab-bar {
             display: flex;
-            justify-content: center;
+            border-bottom: 1px solid var(--vscode-panel-border);
+            background: var(--vscode-editorGroupHeader-tabsBackground);
+            position: sticky;
+            top: 0;
+            z-index: 100;
         }
-        #sunburst {
-            width: 100%;
-            height: 100%;
-            min-height: 600px;
+        .tab-btn {
+            padding: 10px 20px;
+            border: none;
+            background: transparent;
+            color: var(--vscode-foreground);
+            cursor: pointer;
+            font-size: 13px;
+            border-bottom: 2px solid transparent;
+            opacity: 0.7;
         }
-        #sunburst svg {
-            display: block;
-            margin: 0 auto;
+        .tab-btn:hover { opacity: 1; }
+        .tab-btn.active {
+            opacity: 1;
+            border-bottom-color: var(--vscode-focusBorder);
+            color: var(--vscode-foreground);
         }
-        .loading {
+
+        /* Tab content */
+        .tab-content { display: none; padding: 16px; }
+        .tab-content.active { display: block; }
+
+        /* Stats bar */
+        .stats-bar {
             display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            font-size: 18px;
+            gap: 16px;
+            flex-wrap: wrap;
+            margin-bottom: 20px;
         }
-        .tooltip {
-            position: absolute;
-            padding: 10px;
-            background: var(--vscode-editor-background);
+        .stat-card {
+            padding: 12px 20px;
+            background: var(--vscode-editorWidget-background);
             border: 1px solid var(--vscode-panel-border);
             border-radius: 4px;
-            pointer-events: none;
-            font-size: 12px;
-            opacity: 0;
-            transition: opacity 0.3s;
+            min-width: 140px;
         }
-        .tooltip.visible {
-            opacity: 1;
+        .stat-card .label {
+            font-size: 11px;
+            text-transform: uppercase;
+            opacity: 0.7;
+            margin-bottom: 4px;
         }
-        .controls {
-            position: fixed;
-            top: 10px;
-            left: 10px;
-            z-index: 1000;
+        .stat-card .value {
+            font-size: 20px;
+            font-weight: bold;
         }
+
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+        th, td {
+            padding: 8px 12px;
+            text-align: left;
+            border-bottom: 1px solid var(--vscode-panel-border);
+        }
+        th {
+            background: var(--vscode-editorWidget-background);
+            cursor: pointer;
+            user-select: none;
+            position: sticky;
+            top: 42px;
+            z-index: 10;
+        }
+        th:hover { background: var(--vscode-list-hoverBackground); }
+        th .sort-arrow { margin-left: 4px; opacity: 0.5; }
+        tr:hover { background: var(--vscode-list-hoverBackground); }
+        .right { text-align: right; }
+
+        /* Search */
+        .search-box {
+            padding: 6px 12px;
+            margin-bottom: 12px;
+            width: 100%;
+            max-width: 400px;
+            background: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border: 1px solid var(--vscode-input-border);
+            border-radius: 4px;
+            font-size: 13px;
+        }
+        .search-box:focus {
+            outline: none;
+            border-color: var(--vscode-focusBorder);
+        }
+
+        /* Dominator tree */
+        .tree-row {
+            display: flex;
+            align-items: center;
+            padding: 6px 12px;
+            cursor: pointer;
+            border-bottom: 1px solid var(--vscode-panel-border);
+        }
+        .tree-row:hover { background: var(--vscode-list-hoverBackground); }
+        .tree-toggle { width: 20px; text-align: center; opacity: 0.6; flex-shrink: 0; }
+        .tree-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .tree-size { min-width: 100px; text-align: right; opacity: 0.8; }
+        .tree-pct { min-width: 60px; text-align: right; opacity: 0.6; font-size: 12px; }
+        .tree-children { padding-left: 20px; }
+
+        /* Leak suspect cards */
+        .suspect-card {
+            padding: 16px;
+            margin-bottom: 12px;
+            background: var(--vscode-editorWidget-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 6px;
+            border-left: 4px solid var(--vscode-editorWarning-foreground);
+        }
+        .suspect-card.high { border-left-color: var(--vscode-editorError-foreground); }
+        .suspect-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .suspect-class { font-weight: bold; font-size: 14px; }
+        .suspect-badge {
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: bold;
+        }
+        .suspect-badge.high {
+            background: var(--vscode-editorError-foreground);
+            color: var(--vscode-editor-background);
+        }
+        .suspect-badge.medium {
+            background: var(--vscode-editorWarning-foreground);
+            color: var(--vscode-editor-background);
+        }
+        .suspect-desc { opacity: 0.8; font-size: 13px; }
+
+        /* Charts */
+        #pie-chart { width: 100%; max-width: 500px; margin: 20px auto; }
+        #sunburst-chart { width: 100%; display: flex; justify-content: center; margin-top: 16px; }
+
+        .loading {
+            padding: 40px;
+            text-align: center;
+            opacity: 0.6;
+            font-size: 14px;
+        }
+
+        .section-title {
+            font-size: 16px;
+            font-weight: bold;
+            margin: 20px 0 12px 0;
+        }
+
         .btn {
-            padding: 8px 16px;
+            padding: 6px 14px;
             background: var(--vscode-button-background);
             color: var(--vscode-button-foreground);
             border: none;
@@ -238,456 +199,326 @@ export class HeapAnalysisWebviewProvider {
             font-size: 12px;
             margin-right: 8px;
         }
-        .btn:hover {
-            background: var(--vscode-button-hoverBackground);
-        }
-        .btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
+        .btn:hover { background: var(--vscode-button-hoverBackground); }
     </style>
 </head>
 <body>
-    <div id="debug">Webview loaded. Waiting for data...</div>
-    <div class="controls">
-        <button id="reset-btn" class="btn" style="display: none;">← Back to Root</button>
+    <div class="tab-bar">
+        <button class="tab-btn active" data-tab="overview">Overview</button>
+        <button class="tab-btn" data-tab="histogram">Histogram</button>
+        <button class="tab-btn" data-tab="domtree">Dominator Tree</button>
+        <button class="tab-btn" data-tab="leaks">Leak Suspects</button>
     </div>
-    <div id="chart-container">
-        <div id="sunburst"></div>
-        <div class="tooltip" id="tooltip"></div>
+
+    <!-- Tab 1: Overview -->
+    <div id="tab-overview" class="tab-content active">
+        <div class="stats-bar" id="stats-bar">
+            <div class="loading">Waiting for analysis...</div>
+        </div>
+        <div class="section-title">Top Objects by Retained Size</div>
+        <div id="top-objects-table"></div>
+        <div class="section-title">Heap Composition</div>
+        <div id="pie-chart"></div>
+    </div>
+
+    <!-- Tab 2: Histogram -->
+    <div id="tab-histogram" class="tab-content">
+        <input type="text" class="search-box" id="histogram-search" placeholder="Filter by class name...">
+        <div id="histogram-table"></div>
+    </div>
+
+    <!-- Tab 3: Dominator Tree -->
+    <div id="tab-domtree" class="tab-content">
+        <button class="btn" id="reset-tree-btn" style="display:none; margin-bottom: 12px;">Back to Root</button>
+        <div id="dominator-tree"><div class="loading">Waiting for analysis...</div></div>
+        <div id="sunburst-chart"></div>
+    </div>
+
+    <!-- Tab 4: Leak Suspects -->
+    <div id="tab-leaks" class="tab-content">
+        <div id="leak-suspects"><div class="loading">Waiting for analysis...</div></div>
     </div>
 
     <script src="${d3Uri}"></script>
     <script>
-        console.log('[Webview] Script starting to execute...');
-        
-        // Check if acquireVsCodeApi is available
-        if (typeof acquireVsCodeApi === 'undefined') {
-            console.error('[Webview] acquireVsCodeApi is not available!');
-            document.body.innerHTML = '<div class="loading">Error: VS Code API not available</div>';
-        } else {
-            console.log('[Webview] acquireVsCodeApi found');
-        }
-        
+    (function() {
         const vscode = acquireVsCodeApi();
-        console.log('[Webview] VS Code API acquired');
-        
-        // Check if D3 loaded (it loads asynchronously, so we'll check later)
-        console.log('[Webview] Checking for D3.js...');
-        
-        // Sunburst chart implementation using D3.js
-        class SunburstChart {
-            constructor(containerId) {
-                this.container = document.getElementById(containerId);
-                this.width = 800;
-                this.height = 800;
-                this.radius = Math.min(this.width, this.height) / 2;
-                this.data = null;
-                this.originalData = null; // Store original data for reset
-                this.currentRoot = null;
-                
-                // Clear container first
-                this.container.innerHTML = '';
-                
-                // Create SVG
-                this.svg = d3.select(this.container)
-                    .append('svg')
-                    .attr('width', this.width)
-                    .attr('height', this.height)
-                    .style('display', 'block');
-                
-                this.g = this.svg.append('g')
-                    .attr('transform', \`translate(\${this.width / 2}, \${this.height / 2})\`);
-                
-                // Create tooltip
-                this.tooltip = d3.select('#tooltip');
-                
-                // Color scale - D3 v7 uses different scheme names
-                // schemeCategory20 was removed in v7, use schemeCategory10 or a custom array
-                let colorScheme;
-                if (d3.schemeCategory10) {
-                    colorScheme = d3.schemeCategory10;
-                } else if (d3.schemeSet3) {
-                    colorScheme = d3.schemeSet3;
-                } else {
-                    // Fallback: custom color palette
-                    colorScheme = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#aec7e8', '#ffbb78', '#98df8a', '#ff9896', '#c5b0d5', '#c49c94', '#f7b6d3', '#dbdb8d', '#9edae5'];
-                }
-                this.color = d3.scaleOrdinal(colorScheme);
-            }
-            
-            // Convert flat array to hierarchical structure
-            // For the initial view (top 2 layers), we show nodes in a flat structure
-            // When drilling down, we'll receive children and update the hierarchy
-            buildHierarchy(data, parentId = null) {
-                // Create root node
-                const root = {
-                    name: parentId === null ? 'GC Roots' : \`Node #\${parentId}\`,
-                    children: [],
-                    value: 0,
-                    objectId: parentId,
-                    nodeType: parentId === null ? 'SuperRoot' : 'Node',
-                    shallowSize: 0,
-                    retainedSize: 0
-                };
-                
-                // Convert data to nodes, filtering out invalid entries
-                const nodes = data
-                    .filter(d => d && d.retained_size > 0 && d.node_type !== 'Class')
-                    .map(d => {
-                        // Create a more meaningful name
-                        let name;
-                        if (d.object_id === 0) {
-                            name = d.node_type;
-                        } else {
-                            const shortId = d.object_id.toString().slice(-8);
-                            const sizeMB = (d.retained_size / (1024 * 1024)).toFixed(2);
-                            name = \`\${d.node_type} (\${sizeMB} MB)\`;
-                        }
-                        
-                        return {
-                            name: name,
-                            value: d.retained_size,
-                            objectId: d.object_id,
-                            nodeType: d.node_type,
-                            shallowSize: d.shallow_size || 0,
-                            retainedSize: d.retained_size || 0,
-                            children: [] // Will be populated on drill-down
-                        };
-                    });
-                
-                // Sort by retained size (descending)
-                nodes.sort((a, b) => b.value - a.value);
-                
-                // Use all nodes (already filtered and sorted)
-                const topNodes = nodes;
-                
-                root.children = topNodes;
-                root.value = d3.sum(topNodes, d => d.value);
-                
-                console.log('[SunburstChart] Built hierarchy:', {
-                    totalNodes: nodes.length,
-                    displayedNodes: topNodes.length,
-                    totalValue: root.value
-                });
-                
-                return root;
-            }
-            
-            // Update chart with new data
-            update(data, rootNode = null) {
-                try {
-                    console.log('[SunburstChart] update called with', data ? data.length : 0, 'items');
-                    
-                    if (!data || data.length === 0) {
-                        console.error('[SunburstChart] No data provided');
-                        this.container.innerHTML = '<div class="loading">No data available</div>';
-                        return;
-                    }
-                    
-                    if (typeof d3 === 'undefined') {
-                        console.error('[SunburstChart] D3 is not available');
-                        this.container.innerHTML = '<div class="loading">D3.js not loaded</div>';
-                        return;
-                    }
-                    
-                    this.data = data;
-                    // Store original data if this is the root view
-                    if (rootNode === null) {
-                        this.originalData = data;
-                    }
-                    this.currentRoot = rootNode;
-                    
-                    const root = this.buildHierarchy(data, rootNode);
-                    console.log('[SunburstChart] Built hierarchy, root has', root.children ? root.children.length : 0, 'children');
-                    
-                    const partition = d3.partition()
-                        .size([2 * Math.PI, this.radius]);
-                    
-                    const arc = d3.arc()
-                        .startAngle(d => d.x0)
-                        .endAngle(d => d.x1)
-                        .innerRadius(d => d.y0)
-                        .outerRadius(d => d.y1);
-                    
-                    const rootHierarchy = d3.hierarchy(root)
-                        .sum(d => d.value || 0)
-                        .sort((a, b) => (b.value || 0) - (a.value || 0));
-                    
-                    partition(rootHierarchy);
-                    
-                    console.log('[SunburstChart] Partition computed, descendants:', rootHierarchy.descendants().length);
-                    
-                    // Clear previous arcs and labels
-                    this.g.selectAll('path').remove();
-                    this.g.selectAll('text').remove();
-                    
-                    // Draw arcs
-                    const paths = this.g.selectAll('path')
-                        .data(rootHierarchy.descendants().filter(d => d.depth > 0)) // Filter out root node itself
-                        .enter()
-                        .append('path')
-                        .attr('d', arc)
-                        .style('fill', d => {
-                            while (d.depth > 1) d = d.parent;
-                            return this.color(d.data.name);
-                        })
-                        .style('stroke', '#fff')
-                        .style('stroke-width', '1px')
-                        .style('opacity', 0.9)
-                        .style('cursor', 'pointer')
-                        .on('mouseover', (event, d) => {
-                            this.tooltip
-                                .html(\`
-                                    <strong>\${d.data.name}</strong><br/>
-                                    Type: \${d.data.nodeType || 'N/A'}<br/>
-                                    Retained: \${this.formatBytes(d.data.retainedSize || d.value)}<br/>
-                                    Shallow: \${this.formatBytes(d.data.shallowSize || 0)}<br/>
-                                    Object ID: \${d.data.objectId || 'N/A'}
-                                \`)
-                                .style('left', (event.pageX + 10) + 'px')
-                                .style('top', (event.pageY - 10) + 'px')
-                                .classed('visible', true);
-                        })
-                        .on('mouseout', () => {
-                            this.tooltip.classed('visible', false);
-                        })
-                        .on('click', (event, d) => {
-                            if (d.data.objectId !== undefined && d.data.objectId !== 0) {
-                                // Request children for this node
-                                vscode.postMessage({
-                                    command: 'getChildren',
-                                    objectId: d.data.objectId
-                                });
-                            }
-                        });
-                    
-                    console.log('[SunburstChart] Chart updated successfully, paths drawn:', paths.size());
-                    
-                    // Hide loading message
-                    const loadingEl = this.container.querySelector('.loading');
-                    if (loadingEl) {
-                        loadingEl.style.display = 'none';
-                    }
-                } catch (error) {
-                    console.error('[SunburstChart] Error in update:', error);
-                    this.container.innerHTML = \`<div class="loading">Error rendering chart: \${error.message}</div>\`;
-                }
-            }
-            
-            // Handle drill-down to show children
-            drillDown(children, parentObjectId) {
-                // Update chart with children data, showing them as children of the parent
-                // Animate transition to new view
-                this.update(children, parentObjectId);
-            }
-            
-            // Reset to root view
-            reset() {
-                if (this.originalData) {
-                    this.currentRoot = null;
-                    this.update(this.originalData, null);
-                    // Hide reset button
-                    const resetBtn = document.getElementById('reset-btn');
-                    if (resetBtn) {
-                        resetBtn.style.display = 'none';
-                    }
-                }
-            }
-            
-            formatBytes(bytes) {
-                if (bytes === 0) return '0 B';
-                const k = 1024;
-                const sizes = ['B', 'KB', 'MB', 'GB'];
-                const i = Math.floor(Math.log(bytes) / Math.log(k));
-                return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
-            }
-        }
-        
-        // Wait for D3.js to load, then initialize chart
-        let chart = null;
-        let d3Loaded = false;
-        let d3CheckAttempts = 0;
-        const maxD3CheckAttempts = 50; // 5 seconds total (50 * 100ms)
-        let pendingData = null; // Queue data if it arrives before chart is ready
-        
-        function checkD3AndInit() {
-            d3CheckAttempts++;
-            if (typeof d3 !== 'undefined' && !d3Loaded) {
-                d3Loaded = true;
-                console.log('[Webview] D3.js loaded successfully, version:', d3.version);
-                updateDebug('D3.js loaded, initializing chart...');
-                try {
-                    chart = new SunburstChart('sunburst');
-                    console.log('[Webview] Chart initialized successfully');
-                    updateDebug('Chart initialized, ready for data');
-                    
-                    // If we have pending data, process it now
-                    if (pendingData) {
-                        console.log('[Webview] Processing queued data now that chart is ready');
-                        updateDebug('Processing queued data...');
-                        try {
-                            chart.update(pendingData);
-                            updateDebug('Chart updated successfully');
-                            pendingData = null; // Clear the queue
-                        } catch (error) {
-                            console.error('[Webview] Error updating chart with queued data:', error);
-                            updateDebug(\`ERROR: \${error.message}\`);
-                        }
-                    }
-                } catch (error) {
-                    console.error('[Webview] Failed to initialize chart:', error);
-                    updateDebug(\`ERROR: Failed to initialize chart: \${error.message}\`);
-                    const sunburstEl = document.getElementById('sunburst');
-                    if (sunburstEl) {
-                        sunburstEl.innerHTML = \`<div class="loading">Failed to initialize chart: \${error.message}</div>\`;
-                    }
-                }
-            } else if (!d3Loaded && d3CheckAttempts < maxD3CheckAttempts) {
-                // D3 not loaded yet, check again in 100ms
-                updateDebug(\`Waiting for D3.js... (attempt \${d3CheckAttempts}/\${maxD3CheckAttempts})\`);
-                setTimeout(checkD3AndInit, 100);
-            } else if (!d3Loaded) {
-                // Timeout reached
-                console.error('[Webview] D3.js failed to load after', maxD3CheckAttempts * 100, 'ms');
-                updateDebug('ERROR: D3.js failed to load. Check internet connection.');
-                const sunburstEl = document.getElementById('sunburst');
-                if (sunburstEl) {
-                    sunburstEl.innerHTML = '<div class="loading">Error: D3.js library failed to load. Please check your internet connection.</div>';
-                }
-            }
-        }
-        
-        // Start checking for D3 after a short delay to let the script tag load
-        setTimeout(() => {
-            checkD3AndInit();
-        }, 200);
-        
-        // Notify extension that webview is ready
-        vscode.postMessage({ command: 'ready' });
-        console.log('[Webview] Sent ready message to extension');
-        
-        // Handle messages from extension
+
+        // State
+        let analysisData = null;
+        let histogramSortCol = 'retained_size';
+        let histogramSortAsc = false;
+        let histogramFilter = '';
+
+        // ---- Tab switching ----
+        document.querySelectorAll('.tab-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                btn.classList.add('active');
+                document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+            });
+        });
+
+        // ---- Message handling ----
         window.addEventListener('message', event => {
-            const message = event.data;
-            console.log('[Webview] Received message:', message.command, message.data ? message.data.length : 'no data');
-            updateDebug(\`Received: \${message.command}\`);
-            
-            // Log full message for debugging (first 1000 chars)
-            const msgStr = JSON.stringify(message).substring(0, 1000);
-            console.log('[Webview] Full message:', msgStr);
-            
-            switch (message.command) {
-                case 'updateData':
-                    updateDebug(\`Received: \${message.command} with \${message.data ? message.data.length : 0} items\`);
-                    
-                    if (!message.data || message.data.length === 0) {
-                        console.error('[Webview] No data received for updateData');
-                        updateDebug('ERROR: No data in message');
-                        document.getElementById('sunburst').innerHTML = '<div class="loading">No data available</div>';
-                        return;
-                    }
-                    
-                    if (!chart) {
-                        console.log('[Webview] Chart not initialized yet, queueing data');
-                        updateDebug('Chart not ready, queueing data...');
-                        pendingData = message.data; // Queue the data
-                        return;
-                    }
-                    
-                    // Chart is ready, update it
-                    console.log('[Webview] Updating chart with', message.data.length, 'items');
-                    updateDebug(\`Updating chart with \${message.data.length} items\`);
-                    try {
-                        chart.update(message.data, null); // null means root view
-                        updateDebug('Chart updated successfully');
-                        // Hide reset button for root view
-                        const resetBtn = document.getElementById('reset-btn');
-                        if (resetBtn) {
-                            resetBtn.style.display = 'none';
-                        }
-                    } catch (error) {
-                        console.error('[Webview] Error updating chart:', error);
-                        updateDebug(\`ERROR: \${error.message}\`);
-                        document.getElementById('sunburst').innerHTML = \`<div class="loading">Error updating chart: \${error.message}</div>\`;
-                    }
+            const msg = event.data;
+            switch (msg.command) {
+                case 'analysisComplete':
+                    analysisData = msg;
+                    renderOverview(msg);
+                    renderHistogram(msg.classHistogram || []);
+                    renderDominatorTree(msg.topLayers || []);
+                    renderLeakSuspects(msg.leakSuspects || []);
                     break;
                 case 'childrenResponse':
-                    if (!chart) {
-                        console.error('[Webview] Chart not initialized, cannot drill down');
-                        return;
-                    }
-                    console.log('[Webview] Received children for object', message.objectId);
-                    try {
-                        chart.drillDown(message.children, message.objectId);
-                        // Show reset button when drilling down
-                        const resetBtn = document.getElementById('reset-btn');
-                        if (resetBtn) {
-                            resetBtn.style.display = 'block';
-                        }
-                    } catch (error) {
-                        console.error('[Webview] Error drilling down:', error);
-                        updateDebug(\`ERROR drilling down: \${error.message}\`);
-                    }
+                    expandTreeNode(msg.objectId, msg.children);
                     break;
                 case 'noChildren':
-                    console.log('[Webview] No children for object', message.objectId);
-                    updateDebug(\`No children: \${message.message}\`);
-                    // Show a temporary message
-                    const sunburstEl = document.getElementById('sunburst');
-                    if (sunburstEl) {
-                        const msgEl = document.createElement('div');
-                        msgEl.className = 'loading';
-                        msgEl.textContent = message.message || 'This object has no children';
-                        msgEl.style.position = 'absolute';
-                        msgEl.style.top = '50%';
-                        msgEl.style.left = '50%';
-                        msgEl.style.transform = 'translate(-50%, -50%)';
-                        msgEl.style.zIndex = '1000';
-                        sunburstEl.appendChild(msgEl);
-                        setTimeout(() => msgEl.remove(), 3000);
-                    }
+                    markLeaf(msg.objectId);
                     break;
                 case 'error':
-                    console.error('[Webview] Error:', message.message);
-                    document.getElementById('sunburst').innerHTML = \`<div class="loading">Error: \${message.message}</div>\`;
+                    showError(msg.message);
                     break;
             }
         });
-        
-        // Show loading state initially
-        const sunburstEl = document.getElementById('sunburst');
-        const debugEl = document.getElementById('debug');
-        const resetBtn = document.getElementById('reset-btn');
-        
-        function updateDebug(msg) {
-            if (debugEl) {
-                debugEl.textContent = \`[DEBUG] \${msg}\`;
-                console.log('[Webview]', msg);
-            }
+
+        vscode.postMessage({ command: 'ready' });
+
+        // ---- Helpers ----
+        function fmt(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return (bytes / Math.pow(k, i)).toFixed(i > 1 ? 2 : 0) + ' ' + sizes[i];
         }
-        
-        // Handle reset button click
-        if (resetBtn) {
-            resetBtn.addEventListener('click', () => {
-                if (chart) {
-                    console.log('[Webview] Reset button clicked');
-                    chart.reset();
-                }
+
+        function fmtNum(n) {
+            return n.toLocaleString();
+        }
+
+        function showError(message) {
+            document.getElementById('stats-bar').innerHTML =
+                '<div class="loading" style="color: var(--vscode-editorError-foreground);">Error: ' + escapeHtml(message) + '</div>';
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        // ---- Tab 1: Overview ----
+        function renderOverview(data) {
+            const s = data.summary;
+            if (s) {
+                document.getElementById('stats-bar').innerHTML = [
+                    { label: 'Total Heap', value: fmt(s.total_heap_size) },
+                    { label: 'Objects', value: fmtNum(s.total_instances) },
+                    { label: 'Classes', value: fmtNum(s.total_classes) },
+                    { label: 'Arrays', value: fmtNum(s.total_arrays) },
+                    { label: 'GC Roots', value: fmtNum(s.total_gc_roots) }
+                ].map(c => '<div class="stat-card"><div class="label">' + c.label + '</div><div class="value">' + c.value + '</div></div>').join('');
+            }
+
+            // Top 10 objects table
+            const objs = (data.topObjects || []).filter(o => o.node_type !== 'Class' && o.node_type !== 'SuperRoot' && o.retained_size > 0).slice(0, 10);
+            let html = '<table><thead><tr><th>#</th><th>Class</th><th>Type</th><th class="right">Shallow</th><th class="right">Retained</th></tr></thead><tbody>';
+            objs.forEach((o, i) => {
+                html += '<tr><td>' + (i+1) + '</td><td>' + escapeHtml(o.class_name || o.node_type) + '</td><td>' + o.node_type + '</td><td class="right">' + fmt(o.shallow_size) + '</td><td class="right">' + fmt(o.retained_size) + '</td></tr>';
+            });
+            html += '</tbody></table>';
+            document.getElementById('top-objects-table').innerHTML = html;
+
+            // Pie chart
+            renderPieChart(objs);
+        }
+
+        function renderPieChart(objs) {
+            if (typeof d3 === 'undefined' || objs.length === 0) return;
+            const container = document.getElementById('pie-chart');
+            container.innerHTML = '';
+            const w = 400, h = 400, r = Math.min(w, h) / 2;
+
+            const svg = d3.select(container).append('svg').attr('width', w).attr('height', h);
+            const g = svg.append('g').attr('transform', 'translate(' + w/2 + ',' + h/2 + ')');
+
+            const color = d3.scaleOrdinal(d3.schemeCategory10);
+            const pie = d3.pie().value(d => d.retained_size).sort(null);
+            const arc = d3.arc().innerRadius(r * 0.4).outerRadius(r - 10);
+
+            const arcs = g.selectAll('path').data(pie(objs)).enter().append('path')
+                .attr('d', arc)
+                .attr('fill', (d, i) => color(i))
+                .attr('stroke', 'var(--vscode-editor-background)')
+                .attr('stroke-width', 2)
+                .style('opacity', 0.85);
+
+            arcs.append('title').text(d => (d.data.class_name || d.data.node_type) + ': ' + fmt(d.data.retained_size));
+        }
+
+        // ---- Tab 2: Histogram ----
+        function renderHistogram(histogram) {
+            const container = document.getElementById('histogram-table');
+            let sorted = [...histogram];
+
+            sorted.sort((a, b) => {
+                const va = a[histogramSortCol], vb = b[histogramSortCol];
+                if (typeof va === 'string') return histogramSortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+                return histogramSortAsc ? va - vb : vb - va;
+            });
+
+            if (histogramFilter) {
+                const f = histogramFilter.toLowerCase();
+                sorted = sorted.filter(e => e.class_name.toLowerCase().includes(f));
+            }
+
+            const cols = [
+                { key: 'class_name', label: 'Class Name', cls: '' },
+                { key: 'instance_count', label: 'Instances', cls: 'right' },
+                { key: 'shallow_size', label: 'Shallow Size', cls: 'right' },
+                { key: 'retained_size', label: 'Retained Size', cls: 'right' }
+            ];
+
+            let html = '<table><thead><tr>';
+            cols.forEach(c => {
+                const arrow = histogramSortCol === c.key ? (histogramSortAsc ? ' ▲' : ' ▼') : '';
+                html += '<th class="' + c.cls + '" data-sort="' + c.key + '">' + c.label + '<span class="sort-arrow">' + arrow + '</span></th>';
+            });
+            html += '</tr></thead><tbody>';
+
+            sorted.forEach(e => {
+                html += '<tr><td>' + escapeHtml(e.class_name) + '</td><td class="right">' + fmtNum(e.instance_count) + '</td><td class="right">' + fmt(e.shallow_size) + '</td><td class="right">' + fmt(e.retained_size) + '</td></tr>';
+            });
+            html += '</tbody></table>';
+            container.innerHTML = html;
+
+            // Sort click handlers
+            container.querySelectorAll('th[data-sort]').forEach(th => {
+                th.addEventListener('click', () => {
+                    const col = th.dataset.sort;
+                    if (histogramSortCol === col) histogramSortAsc = !histogramSortAsc;
+                    else { histogramSortCol = col; histogramSortAsc = false; }
+                    renderHistogram(histogram);
+                });
             });
         }
-        
-        if (sunburstEl) {
-            sunburstEl.innerHTML = '<div class="loading">Loading heap analysis data...</div>';
-            updateDebug('Sunburst element found, waiting for data...');
-        } else {
-            console.error('[Webview] Could not find sunburst element');
-            updateDebug('ERROR: Sunburst element not found!');
+
+        document.getElementById('histogram-search').addEventListener('input', (e) => {
+            histogramFilter = e.target.value;
+            if (analysisData) renderHistogram(analysisData.classHistogram || []);
+        });
+
+        // ---- Tab 3: Dominator Tree ----
+        let treeData = [];
+        let totalRetained = 0;
+
+        function renderDominatorTree(layers) {
+            treeData = layers.filter(o => o.node_type !== 'Class' && o.node_type !== 'SuperRoot' && o.retained_size > 0);
+            totalRetained = treeData.reduce((sum, o) => sum + o.retained_size, 0);
+
+            const container = document.getElementById('dominator-tree');
+            container.innerHTML = '';
+
+            treeData.forEach(obj => {
+                container.appendChild(createTreeRow(obj, 0));
+            });
         }
-        
-        updateDebug('Script loaded and initialized');
+
+        function createTreeRow(obj, depth) {
+            const row = document.createElement('div');
+            row.className = 'tree-row';
+            row.style.paddingLeft = (12 + depth * 20) + 'px';
+            row.dataset.objectId = obj.object_id;
+            row.dataset.depth = depth;
+
+            const pct = totalRetained > 0 ? ((obj.retained_size / totalRetained) * 100).toFixed(1) : '0';
+            const displayName = obj.class_name || obj.node_type;
+
+            row.innerHTML =
+                '<span class="tree-toggle">▶</span>' +
+                '<span class="tree-name">' + escapeHtml(displayName) + '</span>' +
+                '<span class="tree-size">' + fmt(obj.retained_size) + '</span>' +
+                '<span class="tree-pct">' + pct + '%</span>';
+
+            row.addEventListener('click', () => {
+                const toggle = row.querySelector('.tree-toggle');
+                const childContainer = row.nextElementSibling;
+
+                if (childContainer && childContainer.classList.contains('tree-children')) {
+                    // Toggle existing children
+                    childContainer.style.display = childContainer.style.display === 'none' ? 'block' : 'none';
+                    toggle.textContent = childContainer.style.display === 'none' ? '▶' : '▼';
+                } else if (toggle.textContent !== '·') {
+                    // Request children
+                    toggle.textContent = '...';
+                    vscode.postMessage({ command: 'getChildren', objectId: obj.object_id });
+                }
+            });
+
+            return row;
+        }
+
+        function expandTreeNode(objectId, children) {
+            const rows = document.querySelectorAll('.tree-row[data-object-id="' + objectId + '"]');
+            rows.forEach(row => {
+                const toggle = row.querySelector('.tree-toggle');
+                const existing = row.nextElementSibling;
+                if (existing && existing.classList.contains('tree-children')) {
+                    existing.remove();
+                }
+
+                toggle.textContent = '▼';
+
+                const childContainer = document.createElement('div');
+                childContainer.className = 'tree-children';
+
+                const depth = parseInt(row.dataset.depth || '0') + 1;
+                const filtered = children.filter(c => c.node_type !== 'Class' && c.retained_size > 0);
+                filtered.forEach(child => {
+                    childContainer.appendChild(createTreeRow(child, depth));
+                });
+
+                row.after(childContainer);
+            });
+        }
+
+        function markLeaf(objectId) {
+            const rows = document.querySelectorAll('.tree-row[data-object-id="' + objectId + '"]');
+            rows.forEach(row => {
+                const toggle = row.querySelector('.tree-toggle');
+                toggle.textContent = '·';
+            });
+        }
+
+        document.getElementById('reset-tree-btn').addEventListener('click', () => {
+            if (analysisData) renderDominatorTree(analysisData.topLayers || []);
+        });
+
+        // ---- Tab 4: Leak Suspects ----
+        function renderLeakSuspects(suspects) {
+            const container = document.getElementById('leak-suspects');
+            if (!suspects || suspects.length === 0) {
+                container.innerHTML = '<div class="loading">No leak suspects detected (no single object or class retains >10% of heap)</div>';
+                return;
+            }
+
+            container.innerHTML = suspects.map(s => {
+                const severity = s.retained_percentage > 30 ? 'high' : 'medium';
+                return '<div class="suspect-card ' + severity + '">' +
+                    '<div class="suspect-header">' +
+                    '<span class="suspect-class">' + escapeHtml(s.class_name) + '</span>' +
+                    '<span class="suspect-badge ' + severity + '">' + s.retained_percentage.toFixed(1) + '%</span>' +
+                    '</div>' +
+                    '<div class="suspect-desc">' + escapeHtml(s.description) + '</div>' +
+                    '<div style="margin-top:8px;opacity:0.6;font-size:12px;">Retained: ' + fmt(s.retained_size) +
+                    (s.object_id ? ' | Object ID: ' + s.object_id : '') + '</div>' +
+                    '</div>';
+            }).join('');
+        }
+    })();
     </script>
 </body>
 </html>`;
-    }
 }

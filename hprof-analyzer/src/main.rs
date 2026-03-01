@@ -60,9 +60,14 @@ struct AnalyzeHeapResult {
     status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     top_objects: Option<Vec<hprof_analyzer::ObjectReport>>,
-    /// Top 2 layers of the dominator tree for initial visualization.
     #[serde(skip_serializing_if = "Option::is_none")]
     top_layers: Option<Vec<hprof_analyzer::ObjectReport>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<hprof_analyzer::HeapSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    class_histogram: Option<Vec<hprof_analyzer::ClassHistogramEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    leak_suspects: Option<Vec<hprof_analyzer::LeakSuspect>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -297,20 +302,21 @@ fn analyze_heap_blocking(
     match analyze_heap_internal(&path, analysis_states.clone()) {
         Ok((top_objects, analysis_state)) => {
             log::info!("Heap analysis completed successfully (request_id: {})", request_id);
-            
-            // Get top objects for initial visualization (filtered to meaningful objects)
-            // Use top_objects directly, but limit to top 20 for better visualization
+
             let top_layers: Vec<_> = top_objects.iter()
                 .filter(|obj| obj.retained_size > 0 && obj.node_type != "Class")
                 .take(20)
                 .cloned()
                 .collect();
-            
+
             AnalyzeHeapResult {
                 request_id,
                 status: "completed".to_string(),
                 top_objects: Some(top_objects),
                 top_layers: Some(top_layers),
+                summary: Some(analysis_state.summary.clone()),
+                class_histogram: Some(analysis_state.class_histogram.clone()),
+                leak_suspects: Some(analysis_state.leak_suspects.clone()),
                 error: None,
             }
         }
@@ -322,6 +328,9 @@ fn analyze_heap_blocking(
                 status: "error".to_string(),
                 top_objects: None,
                 top_layers: None,
+                summary: None,
+                class_histogram: None,
+                leak_suspects: None,
                 error: Some(error_msg),
             }
         }
@@ -474,12 +483,18 @@ async fn main() -> Result<()> {
                         eprintln!("Error handling request: {}", e);
                     }
                 } else if request.method == "get_children" {
-                    // Handle get_children requests
                     if let Err(e) = handle_get_children_request(
                         request,
                         &analysis_states,
                     ).await {
                         eprintln!("Error handling get_children request: {}", e);
+                    }
+                } else if request.method == "export_json" {
+                    if let Err(e) = handle_export_json_request(
+                        request,
+                        &analysis_states,
+                    ).await {
+                        eprintln!("Error handling export_json request: {}", e);
                     }
                 } else {
                     // Unknown method - send error response
@@ -655,13 +670,79 @@ async fn handle_get_children_request(
 
     let json = serde_json::to_string(&response)
         .context("Failed to serialize get_children response")?;
-    
-    // Lock stdout only for the write, then release immediately
+
     {
         let stdout = io::stdout();
         let mut stdout_lock = stdout.lock();
         writeln!(stdout_lock, "{}", json)
             .context("Failed to write get_children response")?;
+        stdout_lock.flush().context("Failed to flush stdout")?;
+    }
+
+    Ok(())
+}
+
+/// Handles an export_json request.
+async fn handle_export_json_request(
+    request: JsonRpcRequest,
+    analysis_states: &Arc<RwLock<HashMap<PathBuf, FileAnalysisState>>>,
+) -> Result<()> {
+    let params = request.params.ok_or_else(|| anyhow::anyhow!("Missing params"))?;
+    let path = params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'path' parameter"))?;
+    let output_path = params
+        .get("output_path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'output_path' parameter"))?;
+
+    let request_id = request.id.ok_or_else(|| anyhow::anyhow!("Request ID required"))?;
+
+    let analysis_states_guard = analysis_states.read()
+        .map_err(|e| anyhow::anyhow!("Failed to read analysis states: {}", e))?;
+
+    let file_state = analysis_states_guard.get(&PathBuf::from(path))
+        .ok_or_else(|| anyhow::anyhow!("No analysis found for file: {}", path))?;
+
+    let state_guard = file_state.state.read()
+        .map_err(|e| anyhow::anyhow!("Failed to read analysis state: {}", e))?;
+
+    let analysis_state = state_guard.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Analysis state not available"))?;
+
+    // Build export data
+    let top_objects = analysis_state.get_top_layers(3, 100);
+
+    let export_data = serde_json::json!({
+        "source_file": path,
+        "summary": analysis_state.summary,
+        "class_histogram": analysis_state.class_histogram,
+        "leak_suspects": analysis_state.leak_suspects,
+        "top_objects": top_objects,
+    });
+
+    // Write to file
+    let export_json = serde_json::to_string_pretty(&export_data)
+        .context("Failed to serialize export data")?;
+    std::fs::write(output_path, export_json)
+        .context("Failed to write export file")?;
+
+    let response = JsonRpcResponse {
+        jsonrpc: "2.0".to_string(),
+        id: request_id,
+        result: Some(serde_json::json!({ "success": true })),
+        error: None,
+    };
+
+    let json = serde_json::to_string(&response)
+        .context("Failed to serialize export_json response")?;
+
+    {
+        let stdout = io::stdout();
+        let mut stdout_lock = stdout.lock();
+        writeln!(stdout_lock, "{}", json)
+            .context("Failed to write export_json response")?;
         stdout_lock.flush().context("Failed to flush stdout")?;
     }
 

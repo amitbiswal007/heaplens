@@ -1,28 +1,42 @@
 {
-  "name": "heap-analyzer",
-  "displayName": "Heap Analyzer",
-  "description": "Analyze Java .hprof files using Rust sidecar",
-  "version": "0.0.1",
+  "name": "heaplens",
+  "displayName": "HeapLens",
+  "description": "LLM-powered Java heap dump analyzer with interactive visualizations",
+  "version": "0.1.0",
   "engines": {
     "vscode": "^1.74.0"
   },
   "categories": [
+    "Debuggers",
+    "Visualization",
     "Other"
   ],
   "activationEvents": [
-    "onCommand:heapAnalyzer.parse",
-    "onCommand:javaheap.analyzeFile"
+    "onCustomEditor:heaplens.hprofEditor",
+    "onCommand:heaplens.analyzeFile"
   ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "heapAnalyzer.parse",
-        "title": "Parse HPROF File"
+        "command": "heaplens.analyzeFile",
+        "title": "HeapLens: Analyze HPROF File"
       },
       {
-        "command": "javaheap.analyzeFile",
-        "title": "Analyze HPROF File"
+        "command": "heaplens.exportJson",
+        "title": "HeapLens: Export Analysis to JSON"
+      }
+    ],
+    "customEditors": [
+      {
+        "viewType": "heaplens.hprofEditor",
+        "displayName": "HeapLens HPROF Viewer",
+        "selector": [
+          {
+            "filenamePattern": "*.hprof"
+          }
+        ],
+        "priority": "default"
       }
     ]
   },
