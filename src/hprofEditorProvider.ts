@@ -63,18 +63,22 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
             this.outputChannel.appendLine(`[HeapLens] Webview message: ${message.command}`);
             switch (message.command) {
                 case 'getChildren':
+                    this.outputChannel.appendLine(`[HeapLens] getChildren request for objectId: ${message.objectId}`);
                     try {
                         const children = await client.sendRequest('get_children', {
                             path: hprofPath,
                             object_id: message.objectId
                         });
+                        this.outputChannel.appendLine(`[HeapLens] getChildren response: ${Array.isArray(children) ? children.length + ' children' : typeof children}`);
                         if (Array.isArray(children) && children.length > 0) {
+                            this.outputChannel.appendLine(`[HeapLens] Sending childrenResponse with ${children.length} children`);
                             webviewPanel.webview.postMessage({
                                 command: 'childrenResponse',
                                 objectId: message.objectId,
                                 children
                             });
                         } else {
+                            this.outputChannel.appendLine(`[HeapLens] No children, sending noChildren`);
                             webviewPanel.webview.postMessage({
                                 command: 'noChildren',
                                 objectId: message.objectId,
@@ -82,6 +86,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                             });
                         }
                     } catch (error: any) {
+                        this.outputChannel.appendLine(`[HeapLens] getChildren error: ${error.message}`);
                         webviewPanel.webview.postMessage({
                             command: 'noChildren',
                             objectId: message.objectId,

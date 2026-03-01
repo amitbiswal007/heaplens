@@ -227,31 +227,15 @@ impl Server {
         let analysis_state = state_guard.as_ref()
             .ok_or_else(|| anyhow::anyhow!("Analysis state not available"))?;
 
-        // Get children
-        match analysis_state.get_children(object_id) {
-            Some(children) => {
-                let response = JsonRpcResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id: request_id,
-                    result: Some(serde_json::to_value(children)?),
-                    error: None,
-                };
-                self.send_response(stdout, &response)?;
-            }
-            None => {
-                let error_response = JsonRpcResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id: request_id,
-                    result: None,
-                    error: Some(JsonRpcError {
-                        code: -32000,
-                        message: format!("Node not found or has no children: object_id={}", object_id),
-                        data: None,
-                    }),
-                };
-                self.send_response(stdout, &error_response)?;
-            }
-        }
+        // Get children — return empty array if node not found or has no children
+        let children = analysis_state.get_children(object_id).unwrap_or_default();
+        let response = JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            id: request_id,
+            result: Some(serde_json::to_value(children)?),
+            error: None,
+        };
+        self.send_response(stdout, &response)?;
 
         Ok(())
     }
@@ -644,28 +628,13 @@ async fn handle_get_children_request(
     let analysis_state = state_guard.as_ref()
         .ok_or_else(|| anyhow::anyhow!("Analysis state not available"))?;
 
-    // Get children
-    let response = match analysis_state.get_children(object_id) {
-        Some(children) => {
-            JsonRpcResponse {
-                jsonrpc: "2.0".to_string(),
-                id: request_id,
-                result: Some(serde_json::to_value(children)?),
-                error: None,
-            }
-        }
-        None => {
-            JsonRpcResponse {
-                jsonrpc: "2.0".to_string(),
-                id: request_id,
-                result: None,
-                error: Some(JsonRpcError {
-                    code: -32000,
-                    message: format!("Node not found or has no children: object_id={}", object_id),
-                    data: None,
-                }),
-            }
-        }
+    // Get children — return empty array if node not found or has no children
+    let children = analysis_state.get_children(object_id).unwrap_or_default();
+    let response = JsonRpcResponse {
+        jsonrpc: "2.0".to_string(),
+        id: request_id,
+        result: Some(serde_json::to_value(children)?),
+        error: None,
     };
 
     let json = serde_json::to_string(&response)

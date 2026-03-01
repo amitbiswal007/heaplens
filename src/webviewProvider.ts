@@ -299,6 +299,7 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     expandTreeNode(msg.objectId, msg.children);
                     break;
                 case 'noChildren':
+                    console.log('[HeapLens] noChildren received for:', msg.objectId);
                     markLeaf(msg.objectId);
                     break;
                 case 'error':
@@ -535,10 +536,13 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         }
 
         function markLeaf(objectId) {
-            const rows = document.querySelectorAll('.tree-row[data-object-id="' + objectId + '"]');
+            const selector = '.tree-row[data-object-id="' + objectId + '"]';
+            const rows = document.querySelectorAll(selector);
+            console.log('[HeapLens] markLeaf:', objectId, 'selector:', selector, 'matched:', rows.length);
             rows.forEach(row => {
                 const toggle = row.querySelector('.tree-toggle');
                 toggle.textContent = '·';
+                row.classList.remove('expandable');
             });
         }
 
