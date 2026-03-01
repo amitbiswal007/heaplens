@@ -512,13 +512,20 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     existing.remove();
                 }
 
+                const depth = parseInt(row.dataset.depth || '0') + 1;
+                const filtered = children.filter(c => c.node_type !== 'Class' && c.retained_size > 0);
+
+                if (filtered.length === 0) {
+                    toggle.textContent = '·';
+                    row.classList.remove('expandable');
+                    return;
+                }
+
                 toggle.textContent = '▼';
 
                 const childContainer = document.createElement('div');
                 childContainer.className = 'tree-children';
 
-                const depth = parseInt(row.dataset.depth || '0') + 1;
-                const filtered = children.filter(c => c.node_type !== 'Class' && c.retained_size > 0);
                 filtered.forEach(child => {
                     childContainer.appendChild(createTreeRow(child, depth));
                 });
