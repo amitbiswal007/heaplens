@@ -5,6 +5,7 @@ import { getWebviewContent } from './webviewProvider';
 import { AnalysisData, formatAnalysisContext } from './analysisContext';
 import { streamLlmResponse, LlmConfig, ChatMessage } from './llmClient';
 import { HEAP_ANALYSIS_SYSTEM_PROMPT, buildAnalyzePrompt } from './promptTemplates';
+import { resolveSource } from './sourceResolver';
 
 /**
  * Custom readonly editor provider for .hprof files.
@@ -111,6 +112,9 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                     break;
                 case 'chatMessage':
                     this.handleChatMessage(message.text, webviewPanel);
+                    break;
+                case 'goToSource':
+                    this.handleGoToSource(message.className, webviewPanel);
                     break;
                 case 'ready':
                     this.outputChannel.appendLine('[HeapLens] Webview ready');
@@ -303,6 +307,15 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                 webviewPanel.webview.postMessage({ command: 'chatError', message: error });
             }
         );
+    }
+
+    private async handleGoToSource(className: string, webviewPanel: vscode.WebviewPanel): Promise<void> {
+        const uri = await resolveSource(className);
+        if (uri) {
+            await vscode.window.showTextDocument(uri);
+        } else {
+            webviewPanel.webview.postMessage({ command: 'sourceNotFound', className });
+        }
     }
 
     public getRustClient(): RustClient | null {

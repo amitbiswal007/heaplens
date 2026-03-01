@@ -151,6 +151,16 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         .tree-bar { height: 4px; border-radius: 2px; background: var(--vscode-progressBar-background); min-width: 1px; }
         .tree-pct { min-width: 50px; text-align: right; opacity: 0.6; font-size: 12px; }
         .tree-children { padding-left: 20px; }
+        .tree-source {
+            margin-left: 6px;
+            flex-shrink: 0;
+            cursor: pointer;
+            opacity: 0;
+            font-size: 12px;
+            transition: opacity 0.15s;
+        }
+        .tree-row:hover .tree-source { opacity: 0.6; }
+        .tree-source:hover { opacity: 1 !important; }
 
         /* Leak suspect cards */
         .suspect-card {
@@ -184,6 +194,13 @@ export function getWebviewContent(_webview: vscode.Webview): string {
             color: var(--vscode-editor-background);
         }
         .suspect-desc { opacity: 0.8; font-size: 13px; }
+        .go-to-source-link {
+            cursor: pointer;
+            color: var(--vscode-textLink-foreground);
+            text-decoration: none;
+            margin-left: 8px;
+        }
+        .go-to-source-link:hover { text-decoration: underline; }
 
         /* Charts */
         #pie-chart { width: 100%; max-width: 500px; margin: 20px auto; }
@@ -295,6 +312,23 @@ export function getWebviewContent(_webview: vscode.Webview): string {
             margin-right: 8px;
         }
         .btn:hover { background: var(--vscode-button-hoverBackground); }
+
+        /* Source-not-found toast */
+        .source-toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            padding: 8px 16px;
+            background: var(--vscode-editorWidget-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 4px;
+            font-size: 12px;
+            opacity: 0;
+            transition: opacity 0.3s;
+            z-index: 200;
+            pointer-events: none;
+        }
+        .source-toast.visible { opacity: 1; }
     </style>
 </head>
 <body>
@@ -362,6 +396,8 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         </div>
     </div>
 
+    <div class="source-toast" id="source-toast"></div>
+
     <script src="${d3Uri}"></script>
     <script>
     (function() {
@@ -401,6 +437,9 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     console.log('[HeapLens] noChildren received for:', msg.objectId);
                     markLeaf(msg.objectId);
                     break;
+                case 'sourceNotFound':
+                    showSourceToast(msg.className);
+                    break;
                 case 'error':
                     showError(msg.message);
                     break;
@@ -431,6 +470,26 @@ export function getWebviewContent(_webview: vscode.Webview): string {
             const div = document.createElement('div');
             div.textContent = str;
             return div.innerHTML;
+        }
+
+        function isResolvableClass(className) {
+            if (!className) return false;
+            const primArrays = ['byte[]','short[]','int[]','long[]','float[]','double[]','char[]','boolean[]'];
+            if (primArrays.indexOf(className) !== -1) return false;
+            const prefixes = ['java.','javax.','sun.','com.sun.','jdk.'];
+            for (let i = 0; i < prefixes.length; i++) {
+                if (className.indexOf(prefixes[i]) === 0) return false;
+            }
+            return true;
+        }
+
+        let toastTimer = null;
+        function showSourceToast(className) {
+            const toast = document.getElementById('source-toast');
+            toast.textContent = 'Source not found: ' + className;
+            toast.classList.add('visible');
+            if (toastTimer) clearTimeout(toastTimer);
+            toastTimer = setTimeout(() => toast.classList.remove('visible'), 3000);
         }
 
         // ---- Tab 1: Overview ----
@@ -576,6 +635,8 @@ export function getWebviewContent(_webview: vscode.Webview): string {
             const displayName = obj.class_name || obj.node_type;
             const typeCls = obj.node_type === 'Array' ? 'array' : 'instance';
 
+            const showSource = (obj.node_type === 'Instance' || obj.node_type === 'Array') && isResolvableClass(displayName);
+
             row.innerHTML =
                 '<span class="tree-toggle">' + (leaf ? '' : '▶') + '</span>' +
                 '<span class="tree-name">' + escapeHtml(displayName) + '</span>' +
@@ -583,7 +644,8 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                 '<span class="tree-shallow">' + fmt(obj.shallow_size) + '</span>' +
                 '<span class="tree-size">' + fmt(obj.retained_size) + '</span>' +
                 '<span class="tree-bar-wrap"><div class="tree-bar" style="width:' + barWidth + '%"></div></span>' +
-                '<span class="tree-pct">' + pctStr + '%</span>';
+                '<span class="tree-pct">' + pctStr + '%</span>' +
+                (showSource ? '<span class="tree-source" title="Go to source">&#8599;</span>' : '');
 
             if (!leaf) {
                 row.addEventListener('click', () => {
@@ -597,6 +659,13 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                         toggle.textContent = '⏳';
                         vscode.postMessage({ command: 'getChildren', objectId: obj.object_id });
                     }
+                });
+            }
+
+            if (showSource) {
+                row.querySelector('.tree-source').addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    vscode.postMessage({ command: 'goToSource', className: displayName });
                 });
             }
 
@@ -725,6 +794,9 @@ export function getWebviewContent(_webview: vscode.Webview): string {
 
             container.innerHTML = suspects.map(s => {
                 const severity = s.retained_percentage > 30 ? 'high' : 'medium';
+                const sourceLink = isResolvableClass(s.class_name)
+                    ? ' | <a class="go-to-source-link" data-class="' + escapeHtml(s.class_name) + '">View Source</a>'
+                    : '';
                 return '<div class="suspect-card ' + severity + '">' +
                     '<div class="suspect-header">' +
                     '<span class="suspect-class">' + escapeHtml(s.class_name) + '</span>' +
@@ -732,9 +804,18 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     '</div>' +
                     '<div class="suspect-desc">' + escapeHtml(s.description) + '</div>' +
                     '<div style="margin-top:8px;opacity:0.6;font-size:12px;">Retained: ' + fmt(s.retained_size) +
-                    (s.object_id ? ' | Object ID: ' + s.object_id : '') + '</div>' +
+                    (s.object_id ? ' | Object ID: ' + s.object_id : '') +
+                    sourceLink + '</div>' +
                     '</div>';
             }).join('');
+
+            // Wire up "View Source" click handlers
+            container.querySelectorAll('.go-to-source-link').forEach(link => {
+                link.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    vscode.postMessage({ command: 'goToSource', className: link.dataset.class });
+                });
+            });
         }
     })();
     </script>
