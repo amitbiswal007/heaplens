@@ -375,6 +375,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
             lines.push('## Heap Summary');
             lines.push('');
             lines.push(`- **Total Heap Size:** ${this.fmtBytes(s.total_heap_size)}`);
+            lines.push(`- **Reachable Heap Size:** ${this.fmtBytes(s.reachable_heap_size || s.total_heap_size)}`);
             lines.push(`- **Objects:** ${s.total_instances.toLocaleString()}`);
             lines.push(`- **Classes:** ${s.total_classes.toLocaleString()}`);
             lines.push(`- **Arrays:** ${s.total_arrays.toLocaleString()}`);

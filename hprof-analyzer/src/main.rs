@@ -437,6 +437,7 @@ fn format_children(children: &[hprof_analyzer::ObjectReport], object_id: u64) ->
 fn format_summary(summary: &hprof_analyzer::HeapSummary) -> String {
     let mut out = String::from("## Heap Summary\n\n");
     out.push_str(&format!("- **Total Heap Size:** {}\n", fmt_bytes(summary.total_heap_size)));
+    out.push_str(&format!("- **Reachable Heap Size:** {}\n", fmt_bytes(summary.reachable_heap_size)));
     out.push_str(&format!("- **Total Objects (instances):** {}\n", summary.total_instances));
     out.push_str(&format!("- **Total Classes:** {}\n", summary.total_classes));
     out.push_str(&format!("- **Total Arrays:** {}\n", summary.total_arrays));

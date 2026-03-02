@@ -538,6 +538,8 @@ pub struct HeapGraph {
     super_root: NodeIndex,
     /// Heap summary statistics collected during graph building.
     summary: HeapSummary,
+    /// Set of object IDs that are classloader instances (for leak detection).
+    classloader_ids: std::collections::HashSet<u64>,
 }
 
 impl HeapGraph {
@@ -577,8 +579,8 @@ impl HeapGraph {
     }
 
     /// Consumes the HeapGraph and returns its parts, avoiding clones.
-    pub fn into_parts(self) -> (Graph<NodeData, (), Directed>, HashMap<u64, NodeIndex>, NodeIndex, HeapSummary) {
-        (self.graph, self.id_to_node, self.super_root, self.summary)
+    pub fn into_parts(self) -> (Graph<NodeData, (), Directed>, HashMap<u64, NodeIndex>, NodeIndex, HeapSummary, std::collections::HashSet<u64>) {
+        (self.graph, self.id_to_node, self.super_root, self.summary, self.classloader_ids)
     }
 }
 
@@ -734,7 +736,16 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
     // Also build a map of class_obj_id -> instance_size from Class sub-records
     let mut class_instance_sizes: HashMap<u64, u32> = HashMap::new();
 
-    // First pass through heap dumps: collect class instance sizes
+    // Collect field descriptors and superclass info for typed reference extraction
+    struct ClassFieldInfo {
+        super_class_id: Option<u64>,
+        own_field_types: Vec<jvm_hprof::heap_dump::FieldType>,
+    }
+    let mut class_field_info: HashMap<u64, ClassFieldInfo> = HashMap::new();
+    // Track all classloader object IDs (for classloader-aware leak detection)
+    let mut classloader_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+
+    // First pass through heap dumps: collect class instance sizes and field descriptors
     for record_result in hprof.records_iter() {
         let record = record_result
             .map_err(|e| anyhow::anyhow!("Failed to parse record: {:?}", e))?;
@@ -749,11 +760,57 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
                         let obj_id = class.obj_id().id();
                         let instance_size = class.instance_size_bytes();
                         class_instance_sizes.insert(obj_id, instance_size);
+
+                        // Collect field types for typed reference extraction
+                        let super_id = class.super_class_obj_id().map(|id| id.id());
+                        let mut own_field_types = Vec::new();
+                        for fd_result in class.instance_field_descriptors() {
+                            if let Ok(fd) = fd_result {
+                                own_field_types.push(fd.field_type());
+                            }
+                        }
+                        class_field_info.insert(obj_id, ClassFieldInfo {
+                            super_class_id: super_id,
+                            own_field_types,
+                        });
+
+                        // Track classloader object IDs
+                        if let Some(cl_id) = class.class_loader_obj_id() {
+                            let cl_val = cl_id.id();
+                            if cl_val != 0 {
+                                classloader_ids.insert(cl_val);
+                            }
+                        }
                     }
                 }
             }
         }
     }
+    log::info!("Collected field descriptors for {} classes, {} unique classloaders",
+        class_field_info.len(), classloader_ids.len());
+
+    // Resolve inheritance chains: for each class, build the complete field layout
+    // (child class fields first, then parent class fields, up to java.lang.Object)
+    let mut class_field_layouts: HashMap<u64, Vec<jvm_hprof::heap_dump::FieldType>> = HashMap::new();
+    let class_ids: Vec<u64> = class_field_info.keys().copied().collect();
+    for class_id in class_ids {
+        let mut layout = Vec::new();
+        let mut current_id = Some(class_id);
+        let mut visited = std::collections::HashSet::new();
+        while let Some(cid) = current_id {
+            if !visited.insert(cid) {
+                break; // cycle protection
+            }
+            if let Some(info) = class_field_info.get(&cid) {
+                layout.extend_from_slice(&info.own_field_types);
+                current_id = info.super_class_id.filter(|&id| id != 0);
+            } else {
+                break;
+            }
+        }
+        class_field_layouts.insert(class_id, layout);
+    }
+    log::info!("Resolved field layouts for {} classes", class_field_layouts.len());
 
     // Main heap dump scan
     for record_result in hprof.records_iter() {
@@ -848,7 +905,14 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
                                 .cloned()
                                 .unwrap_or_else(|| format!("Unknown(0x{:x})", class_obj_id));
 
-                            if !id_to_node.contains_key(&obj_id) {
+                            if let Some(&existing_idx) = id_to_node.get(&obj_id) {
+                                // Upgrade GC root nodes with actual Instance data
+                                if matches!(graph[existing_idx], NodeData::Root) {
+                                    graph[existing_idx] = NodeData::Instance { id: obj_id, size, class_name };
+                                    instance_count += 1;
+                                    total_shallow_size += size as u64;
+                                }
+                            } else {
                                 let node_idx = graph.add_node(NodeData::Instance { id: obj_id, size, class_name });
                                 id_to_node.insert(obj_id, node_idx);
                                 instance_count += 1;
@@ -875,7 +939,13 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
                                 .cloned()
                                 .unwrap_or_else(|| "Object[]".to_string());
 
-                            if !id_to_node.contains_key(&obj_id) {
+                            if let Some(&existing_idx) = id_to_node.get(&obj_id) {
+                                if matches!(graph[existing_idx], NodeData::Root) {
+                                    graph[existing_idx] = NodeData::Array { id: obj_id, size, class_name };
+                                    array_count += 1;
+                                    total_shallow_size += size as u64;
+                                }
+                            } else {
                                 let node_idx = graph.add_node(NodeData::Array { id: obj_id, size, class_name });
                                 id_to_node.insert(obj_id, node_idx);
                                 array_count += 1;
@@ -922,7 +992,13 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
                                 }
                             };
 
-                            if !id_to_node.contains_key(&obj_id) {
+                            if let Some(&existing_idx) = id_to_node.get(&obj_id) {
+                                if matches!(graph[existing_idx], NodeData::Root) {
+                                    graph[existing_idx] = NodeData::Array { id: obj_id, size, class_name };
+                                    array_count += 1;
+                                    total_shallow_size += size as u64;
+                                }
+                            } else {
                                 let node_idx = graph.add_node(NodeData::Array { id: obj_id, size, class_name });
                                 id_to_node.insert(obj_id, node_idx);
                                 array_count += 1;
@@ -947,6 +1023,7 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
 
     let summary = HeapSummary {
         total_heap_size: total_shallow_size,
+        reachable_heap_size: total_shallow_size, // updated after dominator analysis
         total_instances: instance_count,
         total_classes: class_count,
         total_arrays: array_count,
@@ -980,6 +1057,9 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
 
     log::info!("Connected SuperRoot to {} GC roots", gc_root_ids.len());
 
+    let mut typed_instance_count = 0u64;
+    let mut fallback_instance_count = 0u64;
+
     // Scan heap dump segments again to find references
     for record_result in hprof.records_iter() {
         let record = record_result
@@ -995,30 +1075,37 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
                         .map_err(|e| anyhow::anyhow!("Failed to parse sub-record: {:?}", e))?;
 
                     match sub_record {
-                        // Instance references: parse field values to find object references
+                        // Instance references: use typed field descriptors to extract only ObjectId fields
                         jvm_hprof::heap_dump::SubRecord::Instance(instance) => {
                             let instance_id = instance.obj_id().id();
+                            let class_obj_id = instance.class_obj_id().id();
                             let instance_node = id_to_node.get(&instance_id);
-                            
+
                             if let Some(&instance_idx) = instance_node {
-                                // Parse instance fields to find object references
-                                // Note: This is a simplified approach. For accurate parsing,
-                                // we would need class definitions with field descriptors.
-                                // For now, we'll extract potential object IDs from the field data.
                                 let fields = instance.fields();
-                                
-                                // Extract object references from field data
-                                // Field data contains values that may be object IDs
-                                // We'll parse them based on the ID size
-                                extract_object_references(fields, id_size, |ref_id| {
-                                    if let Some(&ref_node) = id_to_node.get(&ref_id) {
-                                        if !graph.contains_edge(instance_idx, ref_node) {
-                                            graph.add_edge(instance_idx, ref_node, ());
-                                            edge_count += 1;
-                                            log::trace!("Added edge: Instance {} -> Object {}", instance_id, ref_id);
+
+                                if let Some(field_types) = class_field_layouts.get(&class_obj_id) {
+                                    typed_instance_count += 1;
+                                    extract_typed_references(fields, id_size, field_types, |ref_id| {
+                                        if let Some(&ref_node) = id_to_node.get(&ref_id) {
+                                            if !graph.contains_edge(instance_idx, ref_node) {
+                                                graph.add_edge(instance_idx, ref_node, ());
+                                                edge_count += 1;
+                                            }
                                         }
-                                    }
-                                });
+                                    });
+                                } else {
+                                    fallback_instance_count += 1;
+                                    log::trace!("No field layout for class 0x{:x}, using fallback for instance {}", class_obj_id, instance_id);
+                                    extract_object_references_fallback(fields, id_size, |ref_id| {
+                                        if let Some(&ref_node) = id_to_node.get(&ref_id) {
+                                            if !graph.contains_edge(instance_idx, ref_node) {
+                                                graph.add_edge(instance_idx, ref_node, ());
+                                                edge_count += 1;
+                                            }
+                                        }
+                                    });
+                                }
                             }
                         }
                         // Array references: parse array contents for object references
@@ -1055,11 +1142,11 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
                                 log::trace!("ObjectArray {} has {} elements", array_id, ref_count);
                             }
                         }
-                        // Class references: superclass and class loader
+                        // Class references: superclass, class loader, and static ObjectId fields
                         jvm_hprof::heap_dump::SubRecord::Class(class) => {
                             let class_id = class.obj_id().id();
                             let class_node = id_to_node.get(&class_id);
-                            
+
                             if let Some(&class_idx) = class_node {
                                 // Reference to superclass
                                 if let Some(super_class_id) = class.super_class_obj_id() {
@@ -1067,18 +1154,35 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
                                         if !graph.contains_edge(class_idx, super_class_node) {
                                             graph.add_edge(class_idx, super_class_node, ());
                                             edge_count += 1;
-                                            log::trace!("Added edge: Class {} -> SuperClass {}", class_id, super_class_id.id());
                                         }
                                     }
                                 }
-                                
+
                                 // Reference to class loader
                                 if let Some(class_loader_id) = class.class_loader_obj_id() {
                                     if let Some(&class_loader_node) = id_to_node.get(&class_loader_id.id()) {
                                         if !graph.contains_edge(class_idx, class_loader_node) {
                                             graph.add_edge(class_idx, class_loader_node, ());
                                             edge_count += 1;
-                                            log::trace!("Added edge: Class {} -> ClassLoader {}", class_id, class_loader_id.id());
+                                        }
+                                    }
+                                }
+
+                                // References from static ObjectId fields
+                                for static_field_result in class.static_fields() {
+                                    if let Ok(static_field) = static_field_result {
+                                        if matches!(static_field.field_type(), jvm_hprof::heap_dump::FieldType::ObjectId) {
+                                            if let jvm_hprof::heap_dump::FieldValue::ObjectId(Some(ref_id)) = static_field.value() {
+                                                let ref_id_val = ref_id.id();
+                                                if ref_id_val != 0 {
+                                                    if let Some(&ref_node) = id_to_node.get(&ref_id_val) {
+                                                        if !graph.contains_edge(class_idx, ref_node) {
+                                                            graph.add_edge(class_idx, ref_node, ());
+                                                            edge_count += 1;
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1091,7 +1195,7 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
         }
     }
 
-    log::info!("Pass 2 complete: added {} edges", edge_count);
+    log::info!("Pass 2 complete: added {} edges (typed: {} instances, fallback: {} instances)", edge_count, typed_instance_count, fallback_instance_count);
     log::info!(
         "Graph construction complete: {} nodes, {} edges",
         graph.node_count(),
@@ -1103,6 +1207,7 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
         id_to_node,
         super_root,
         summary,
+        classloader_ids,
     })
 }
 
@@ -1143,18 +1248,64 @@ fn convert_jvm_class_name(name: &str) -> String {
     }
 }
 
-/// Helper function to extract object references from byte data.
+/// Returns the byte size of a field type in the HPROF binary format.
+fn field_type_size(ft: &jvm_hprof::heap_dump::FieldType, id_size: IdSize) -> usize {
+    use jvm_hprof::heap_dump::FieldType;
+    match ft {
+        FieldType::ObjectId => match id_size { IdSize::U32 => 4, IdSize::U64 => 8 },
+        FieldType::Boolean | FieldType::Byte => 1,
+        FieldType::Char | FieldType::Short => 2,
+        FieldType::Int | FieldType::Float => 4,
+        FieldType::Long | FieldType::Double => 8,
+    }
+}
+
+/// Extracts object references from instance field data using typed field descriptors.
 ///
-/// This function attempts to parse object IDs from byte slices that may contain
-/// object references. It's a simplified approach - for accurate parsing, we would
-/// need field descriptors from class definitions.
+/// Iterates through the field types in order, reading only ObjectId fields as references
+/// and skipping primitive fields by their known byte sizes.
+fn extract_typed_references<F>(
+    data: &[u8],
+    id_size: IdSize,
+    field_types: &[jvm_hprof::heap_dump::FieldType],
+    mut callback: F,
+)
+where
+    F: FnMut(u64),
+{
+    let mut offset = 0;
+    for ft in field_types {
+        let size = field_type_size(ft, id_size);
+        if offset + size > data.len() {
+            break;
+        }
+        if matches!(ft, jvm_hprof::heap_dump::FieldType::ObjectId) {
+            let id = match id_size {
+                IdSize::U32 => {
+                    u32::from_be_bytes([
+                        data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+                    ]) as u64
+                }
+                IdSize::U64 => {
+                    u64::from_be_bytes([
+                        data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+                        data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
+                    ])
+                }
+            };
+            if id != 0 {
+                callback(id);
+            }
+        }
+        offset += size;
+    }
+}
+
+/// Fallback: brute-force extraction of potential object references from byte data.
 ///
-/// # Arguments
-///
-/// * `data` - Byte slice that may contain object references
-/// * `id_size` - Size of object IDs (4 or 8 bytes)
-/// * `callback` - Function called for each potential object ID found
-fn extract_object_references<F>(data: &[u8], id_size: IdSize, mut callback: F)
+/// Used only when a class's field layout cannot be resolved (missing from heap dump).
+/// Reads every ID-sized chunk as a potential object reference.
+fn extract_object_references_fallback<F>(data: &[u8], id_size: IdSize, mut callback: F)
 where
     F: FnMut(u64),
 {
@@ -1162,31 +1313,18 @@ where
         IdSize::U32 => 4,
         IdSize::U64 => 8,
     };
-    
-    // Try to extract object IDs by reading every ID-sized chunk
-    // This is a heuristic - actual field parsing would require class definitions
     for chunk in data.chunks_exact(id_bytes) {
         let id = match id_size {
             IdSize::U32 => {
-                if chunk.len() >= 4 {
-                    u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as u64
-                } else {
-                    continue;
-                }
+                u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as u64
             }
             IdSize::U64 => {
-                if chunk.len() >= 8 {
-                    u64::from_be_bytes([
-                        chunk[0], chunk[1], chunk[2], chunk[3],
-                        chunk[4], chunk[5], chunk[6], chunk[7],
-                    ])
-                } else {
-                    continue;
-                }
+                u64::from_be_bytes([
+                    chunk[0], chunk[1], chunk[2], chunk[3],
+                    chunk[4], chunk[5], chunk[6], chunk[7],
+                ])
             }
         };
-        
-        // Only call callback for non-zero IDs (0 is typically a null reference)
         if id != 0 {
             callback(id);
         }
@@ -1457,6 +1595,9 @@ pub struct LeakSuspect {
 pub struct HeapSummary {
     /// Total heap size in bytes (sum of all shallow sizes).
     pub total_heap_size: u64,
+    /// Reachable heap size in bytes (excludes unreachable objects).
+    /// Set after dominator analysis; defaults to total_heap_size.
+    pub reachable_heap_size: u64,
     /// Total number of object instances.
     pub total_instances: u64,
     /// Total number of classes.
@@ -1730,7 +1871,7 @@ impl AnalysisState {
 pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectReport>, AnalysisState)> {
     log::debug!("Calculating dominators with state for {} nodes", graph.node_count());
 
-    let (petgraph, id_to_node, super_root, summary) = graph.into_parts();
+    let (petgraph, id_to_node, super_root, mut summary, classloader_ids) = graph.into_parts();
 
     // Step 1: Compute dominator tree
     let dominators = dominators::simple_fast(&petgraph, super_root);
@@ -1748,7 +1889,10 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
     // Step 2: Build children map
     // Nodes unreachable from SuperRoot (no immediate dominator) are attached
     // directly to SuperRoot so their sizes are included in the retained total.
+    // Track unreachable shallow size so we can compute reachable-only total.
     let mut children_map: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
+    let mut unreachable_count = 0u64;
+    let mut unreachable_shallow_size = 0u64;
     for node_idx in petgraph.node_indices() {
         if node_idx == super_root {
             continue;
@@ -1758,8 +1902,17 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
         } else {
             // Unreachable node — attach to SuperRoot so retained sizes are correct
             children_map.entry(super_root).or_insert_with(Vec::new).push(node_idx);
+            unreachable_count += 1;
+            // Track unreachable shallow size from graph node data
+            let node_size = match &petgraph[node_idx] {
+                NodeData::Instance { size, .. } | NodeData::Array { size, .. } => *size as u64,
+                _ => 0,
+            };
+            unreachable_shallow_size += node_size;
         }
     }
+    log::info!("Dominator tree: {} unreachable nodes ({:.2} MB) attached to SuperRoot",
+        unreachable_count, unreachable_shallow_size as f64 / (1024.0 * 1024.0));
 
     // Step 3: Calculate shallow sizes
     let mut shallow_sizes: HashMap<NodeIndex, u64> = HashMap::new();
@@ -1885,46 +2038,215 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
     log::info!("Computed class histogram: {} classes", class_histogram.len());
 
     // Step 7: Detect leak suspects
-    // Use total_heap_size from summary (sum of all shallow sizes) as the denominator
-    // for percentages, since it's always correct regardless of dominator tree coverage.
+    // Use reachable_heap_size (excluding unreachable objects) as the denominator.
+    // Eclipse MAT only counts reachable objects, so we match that behavior.
     let total_heap_size = summary.total_heap_size;
+    let reachable_heap_size = if unreachable_shallow_size < total_heap_size {
+        total_heap_size - unreachable_shallow_size
+    } else {
+        total_heap_size // fallback: don't go negative
+    };
+    log::info!("Heap sizes: total={:.2} MB, unreachable={:.2} MB, reachable={:.2} MB",
+        total_heap_size as f64 / (1024.0 * 1024.0),
+        unreachable_shallow_size as f64 / (1024.0 * 1024.0),
+        reachable_heap_size as f64 / (1024.0 * 1024.0));
+    summary.reachable_heap_size = reachable_heap_size;
     let mut leak_suspects = Vec::new();
 
-    if total_heap_size > 0 {
-        // Check dominator tree top-level children for individual objects retaining >10%
-        if let Some(top_children) = children_map.get(&super_root) {
-            for &child_idx in top_children {
-                let retained = retained_sizes.get(&child_idx).copied().unwrap_or(0);
-                let percentage = (retained as f64 / total_heap_size as f64) * 100.0;
-                if percentage > 10.0 {
-                    let (object_id, class_name) = match node_data_map.get(&child_idx) {
-                        Some(&(id, _, ref cn)) => (id, cn.to_string()),
-                        None => (0, String::new()),
-                    };
-                    let display_name = if class_name.is_empty() { "Unknown".to_string() } else { class_name };
-                    leak_suspects.push(LeakSuspect {
-                        class_name: display_name.clone(),
-                        object_id,
-                        retained_size: retained,
-                        retained_percentage: percentage,
-                        description: format!(
-                            "Single {} instance retains {:.1}% of total heap ({:.2} MB)",
-                            display_name,
-                            percentage,
-                            retained as f64 / (1024.0 * 1024.0)
-                        ),
-                    });
+    if reachable_heap_size > 0 {
+        // =====================================================================
+        // Classloader-aware leak detection (similar to Eclipse MAT)
+        // =====================================================================
+        //
+        // Phase 1: Find classloader suspects.
+        //   Classloaders are the "component boundaries" in a Java app. A classloader
+        //   that retains a large % of heap indicates that its loaded component is
+        //   responsible for memory consumption. We know which objects are classloaders
+        //   because Class sub-records reference them via class_loader_obj_id.
+        //
+        // Phase 2: Find accumulation points via dominator tree walk-down.
+        //   Starting from each classloader suspect, walk down the dominator tree
+        //   following the child with the largest retained size. The deepest node
+        //   before memory "fans out" is the accumulation point.
+        //
+        // Phase 3: Class-level aggregates for remaining suspects.
+
+        let threshold_pct = 5.0;
+        let threshold_bytes = (reachable_heap_size as f64 * threshold_pct / 100.0) as u64;
+
+        // --- Phase 1: Classloader suspects ---
+        // Find classloader instances with significant retained sizes
+        let mut classloader_suspects: Vec<(NodeIndex, u64, f64, u64, String)> = Vec::new(); // (idx, retained, pct, obj_id, class_name)
+        for &cl_id in &classloader_ids {
+            if let Some(&node_idx) = id_to_node.get(&cl_id) {
+                let retained = retained_sizes.get(&node_idx).copied().unwrap_or(0);
+                if retained < threshold_bytes {
+                    continue;
+                }
+                let percentage = (retained as f64 / reachable_heap_size as f64) * 100.0;
+                let (object_id, class_name) = match node_data_map.get(&node_idx) {
+                    Some(&(id, _, ref cn)) => (id, cn.to_string()),
+                    None => continue,
+                };
+                // Skip bootstrap/system classloaders (empty class name or Root type)
+                if class_name.is_empty() {
+                    continue;
+                }
+                classloader_suspects.push((node_idx, retained, percentage, object_id, class_name));
+            }
+        }
+        classloader_suspects.sort_by(|a, b| b.1.cmp(&a.1));
+
+        for (node_idx, retained, percentage, object_id, class_name) in classloader_suspects.iter().take(5) {
+            // Walk down the dominator tree to find the accumulation point
+            let mut accum_node = *node_idx;
+            let mut accum_retained = *retained;
+            loop {
+                if let Some(dom_children) = children_map.get(&accum_node) {
+                    // Find the largest child
+                    let mut max_child = None;
+                    let mut max_child_ret = 0u64;
+                    for &child in dom_children {
+                        let child_ret = retained_sizes.get(&child).copied().unwrap_or(0);
+                        if child_ret > max_child_ret {
+                            max_child_ret = child_ret;
+                            max_child = Some(child);
+                        }
+                    }
+                    // If largest child retains >80% of current, it's a pass-through
+                    if let Some(child) = max_child {
+                        if max_child_ret > accum_retained * 4 / 5 {
+                            accum_node = child;
+                            accum_retained = max_child_ret;
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+
+            // Describe the accumulation point
+            let accum_info = if accum_node != *node_idx {
+                let (_, _, ref accum_cn) = node_data_map.get(&accum_node)
+                    .map(|&(id, nt, ref cn)| (id, nt, cn.to_string()))
+                    .unwrap_or((0, "Unknown", String::new()));
+                format!(". Memory accumulated in {} ({:.2} MB)",
+                    accum_cn, accum_retained as f64 / (1024.0 * 1024.0))
+            } else {
+                String::new()
+            };
+
+            leak_suspects.push(LeakSuspect {
+                class_name: class_name.clone(),
+                object_id: *object_id,
+                retained_size: *retained,
+                retained_percentage: *percentage,
+                description: format!(
+                    "Classloader {} retains {:.1}% of reachable heap ({:.2} MB){}",
+                    class_name,
+                    percentage,
+                    *retained as f64 / (1024.0 * 1024.0),
+                    accum_info,
+                ),
+            });
+        }
+
+        // --- Phase 2: Non-classloader individual suspects ---
+        // Find other large retained-size objects not already covered by classloader suspects
+        let classloader_suspect_nodes: std::collections::HashSet<NodeIndex> = leak_suspects
+            .iter().filter_map(|s| id_to_node.get(&s.object_id).copied()).collect();
+
+        let mut other_candidates: Vec<(NodeIndex, u64, f64)> = Vec::new();
+        for node_idx in petgraph.node_indices() {
+            if classloader_suspect_nodes.contains(&node_idx) {
+                continue;
+            }
+            let node_type = match node_data_map.get(&node_idx) {
+                Some(&(_, nt, _)) => nt,
+                None => continue,
+            };
+            if node_type != "Instance" && node_type != "Array" {
+                continue;
+            }
+            let retained = retained_sizes.get(&node_idx).copied().unwrap_or(0);
+            if retained < threshold_bytes {
+                continue;
+            }
+            // Skip objects that are dominated by a classloader suspect
+            // (they're already counted under the classloader)
+            let mut is_under_cl_suspect = false;
+            if let Some(dominator) = dominators.immediate_dominator(node_idx) {
+                // Walk up dominator chain (limited depth)
+                let mut check = dominator;
+                for _ in 0..20 {
+                    if classloader_suspect_nodes.contains(&check) {
+                        is_under_cl_suspect = true;
+                        break;
+                    }
+                    match dominators.immediate_dominator(check) {
+                        Some(parent) if parent != check => check = parent,
+                        _ => break,
+                    }
+                }
+            }
+            if is_under_cl_suspect {
+                continue;
+            }
+            let percentage = (retained as f64 / reachable_heap_size as f64) * 100.0;
+            other_candidates.push((node_idx, retained, percentage));
+        }
+        other_candidates.sort_by(|a, b| b.1.cmp(&a.1));
+
+        // Deduplicate: skip pass-throughs among non-classloader candidates
+        let other_set: std::collections::HashSet<NodeIndex> = other_candidates
+            .iter().map(|&(idx, _, _)| idx).collect();
+        let mut skip_set: std::collections::HashSet<NodeIndex> = std::collections::HashSet::new();
+        for &(node_idx, retained, _) in &other_candidates {
+            if let Some(dom_children) = children_map.get(&node_idx) {
+                for &child in dom_children {
+                    if other_set.contains(&child) {
+                        let child_retained = retained_sizes.get(&child).copied().unwrap_or(0);
+                        if child_retained > retained * 9 / 10 {
+                            skip_set.insert(node_idx);
+                            break;
+                        }
+                    }
                 }
             }
         }
 
-        // Check for class groups collectively retaining >10%
+        for &(node_idx, retained, percentage) in other_candidates.iter().take(10) {
+            if skip_set.contains(&node_idx) {
+                continue;
+            }
+            if leak_suspects.len() >= 10 {
+                break;
+            }
+            let (object_id, class_name) = match node_data_map.get(&node_idx) {
+                Some(&(id, _, ref cn)) => (id, cn.to_string()),
+                None => continue,
+            };
+            let display_name = if class_name.is_empty() { "Unknown".to_string() } else { class_name };
+            leak_suspects.push(LeakSuspect {
+                class_name: display_name.clone(),
+                object_id,
+                retained_size: retained,
+                retained_percentage: percentage,
+                description: format!(
+                    "Single {} instance retains {:.1}% of reachable heap ({:.2} MB)",
+                    display_name,
+                    percentage,
+                    retained as f64 / (1024.0 * 1024.0)
+                ),
+            });
+        }
+
+        // --- Phase 3: Class-level suspects for remaining classes ---
         for entry in &class_histogram {
-            let percentage = (entry.retained_size as f64 / total_heap_size as f64) * 100.0;
+            let percentage = (entry.retained_size as f64 / reachable_heap_size as f64) * 100.0;
             if percentage > 10.0 && entry.instance_count > 1 {
-                // Check if this class group wasn't already covered by individual suspects
                 let already_covered = leak_suspects.iter()
-                    .any(|s| s.class_name == entry.class_name && s.retained_percentage > percentage * 0.5);
+                    .any(|s| s.class_name == entry.class_name);
                 if !already_covered {
                     leak_suspects.push(LeakSuspect {
                         class_name: entry.class_name.clone(),
@@ -1932,7 +2254,7 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
                         retained_size: entry.retained_size,
                         retained_percentage: percentage,
                         description: format!(
-                            "{} instances of {} collectively retain {:.1}% of total heap ({:.2} MB)",
+                            "{} instances of {} collectively retain {:.1}% of reachable heap ({:.2} MB)",
                             entry.instance_count,
                             entry.class_name,
                             percentage,
@@ -2140,6 +2462,7 @@ mod tests {
             leak_suspects: vec![],
             summary: HeapSummary {
                 total_heap_size: 1000,
+                reachable_heap_size: 1000,
                 total_instances: 5,
                 total_classes: 1,
                 total_arrays: 0,

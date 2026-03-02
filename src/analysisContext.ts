@@ -8,6 +8,7 @@
 export interface AnalysisData {
     summary: {
         total_heap_size: number;
+        reachable_heap_size: number;
         total_instances: number;
         total_classes: number;
         total_arrays: number;

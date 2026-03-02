@@ -740,6 +740,7 @@ export function getWebviewContent(_webview: vscode.Webview): string {
             const s = data.summary;
             if (s) {
                 document.getElementById('stats-bar').innerHTML = [
+                    { label: 'Reachable Heap', value: fmt(s.reachable_heap_size || s.total_heap_size) },
                     { label: 'Total Heap', value: fmt(s.total_heap_size) },
                     { label: 'Objects', value: fmtNum(s.total_instances) },
                     { label: 'Classes', value: fmtNum(s.total_classes) },
@@ -1307,7 +1308,7 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                 return;
             }
 
-            const totalHeap = data.summary.total_heap_size;
+            const totalHeap = data.summary.reachable_heap_size || data.summary.total_heap_size;
             if (totalHeap === 0) { section.innerHTML = ''; return; }
 
             const findings = [];
