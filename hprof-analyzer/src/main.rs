@@ -732,6 +732,13 @@ async fn run_jsonrpc_server() -> Result<()> {
                     ).await {
                         eprintln!("Error handling export_json request: {}", e);
                     }
+                } else if request.method == "gc_root_path" {
+                    if let Err(e) = handle_gc_root_path_request(
+                        request,
+                        &analysis_states,
+                    ).await {
+                        eprintln!("Error handling gc_root_path request: {}", e);
+                    }
                 } else {
                     // Unknown method - send error response
                     if let Some(id) = request.id {
@@ -914,6 +921,46 @@ async fn handle_export_json_request(
         "jsonrpc": "2.0",
         "id": request_id,
         "result": { "success": true }
+    });
+    send_stdout(&response)?;
+
+    Ok(())
+}
+
+/// Handles a gc_root_path request.
+async fn handle_gc_root_path_request(
+    request: JsonRpcRequest,
+    analysis_states: &Arc<RwLock<HashMap<PathBuf, FileAnalysisState>>>,
+) -> Result<()> {
+    let params = request.params.ok_or_else(|| anyhow::anyhow!("Missing params"))?;
+    let path = params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'path' parameter"))?;
+    let object_id = params
+        .get("object_id")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'object_id' parameter"))?;
+
+    let request_id = request.id.ok_or_else(|| anyhow::anyhow!("Request ID required"))?;
+
+    let analysis_states_guard = analysis_states.read()
+        .map_err(|e| anyhow::anyhow!("Failed to read analysis states: {}", e))?;
+
+    let file_state = analysis_states_guard.get(&PathBuf::from(path))
+        .ok_or_else(|| anyhow::anyhow!("No analysis found for file: {}", path))?;
+
+    let state_guard = file_state.state.read()
+        .map_err(|e| anyhow::anyhow!("Failed to read analysis state: {}", e))?;
+
+    let analysis_state = state_guard.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Analysis state not available"))?;
+
+    let gc_path = analysis_state.gc_root_path(object_id, 100);
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": gc_path
     });
     send_stdout(&response)?;
 

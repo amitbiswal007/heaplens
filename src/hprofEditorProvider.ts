@@ -130,6 +130,28 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                     }
                     break;
                 }
+                case 'gcRootPath':
+                    this.outputChannel.appendLine(`[HeapLens] gcRootPath request for objectId: ${message.objectId}`);
+                    try {
+                        const gcPath = await client.sendRequest('gc_root_path', {
+                            path: hprofPath,
+                            object_id: message.objectId
+                        });
+                        webviewPanel.webview.postMessage({
+                            command: 'gcRootPathResponse',
+                            path: gcPath
+                        });
+                    } catch (error: any) {
+                        this.outputChannel.appendLine(`[HeapLens] gcRootPath error: ${error.message}`);
+                        webviewPanel.webview.postMessage({
+                            command: 'gcRootPathResponse',
+                            path: null
+                        });
+                    }
+                    break;
+                case 'copyReport':
+                    this.handleCopyReport(webviewPanel);
+                    break;
                 case 'ready':
                     this.outputChannel.appendLine('[HeapLens] Webview ready');
                     this.webviewReady = true;
@@ -321,6 +343,74 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                 webviewPanel.webview.postMessage({ command: 'chatError', message: error });
             }
         );
+    }
+
+    private fmtBytes(bytes: number): string {
+        if (bytes === 0) { return '0 B'; }
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        const idx = Math.min(i, sizes.length - 1);
+        return (bytes / Math.pow(k, idx)).toFixed(idx > 1 ? 2 : 0) + ' ' + sizes[idx];
+    }
+
+    private handleCopyReport(webviewPanel: vscode.WebviewPanel): void {
+        if (!this.lastAnalysisData) {
+            vscode.window.showWarningMessage('No analysis data available for report.');
+            return;
+        }
+
+        const data = this.lastAnalysisData;
+        const lines: string[] = [];
+
+        lines.push('# HeapLens Incident Report');
+        lines.push('');
+        lines.push(`**File:** ${this.currentHprofPath || 'Unknown'}`);
+        lines.push(`**Generated:** ${new Date().toISOString()}`);
+        lines.push('');
+
+        // Heap Summary
+        if (data.summary) {
+            const s = data.summary;
+            lines.push('## Heap Summary');
+            lines.push('');
+            lines.push(`- **Total Heap Size:** ${this.fmtBytes(s.total_heap_size)}`);
+            lines.push(`- **Objects:** ${s.total_instances.toLocaleString()}`);
+            lines.push(`- **Classes:** ${s.total_classes.toLocaleString()}`);
+            lines.push(`- **Arrays:** ${s.total_arrays.toLocaleString()}`);
+            lines.push(`- **GC Roots:** ${s.total_gc_roots.toLocaleString()}`);
+            lines.push('');
+        }
+
+        // Leak Suspects
+        if (data.leakSuspects && data.leakSuspects.length > 0) {
+            lines.push('## Leak Suspects');
+            lines.push('');
+            data.leakSuspects.forEach((s: any) => {
+                const severity = s.retained_percentage > 30 ? 'HIGH' : 'MEDIUM';
+                lines.push(`- **[${severity}] ${s.class_name}** — ${s.retained_percentage.toFixed(1)}% of heap (${this.fmtBytes(s.retained_size)})`);
+                lines.push(`  ${s.description}`);
+            });
+            lines.push('');
+        }
+
+        // Top 10 classes
+        if (data.classHistogram && data.classHistogram.length > 0) {
+            lines.push('## Top 10 Classes by Retained Size');
+            lines.push('');
+            lines.push('| Class | Instances | Shallow | Retained |');
+            lines.push('|-------|-----------|---------|----------|');
+            data.classHistogram.slice(0, 10).forEach((e: any) => {
+                lines.push(`| ${e.class_name} | ${e.instance_count.toLocaleString()} | ${this.fmtBytes(e.shallow_size)} | ${this.fmtBytes(e.retained_size)} |`);
+            });
+            lines.push('');
+        }
+
+        const report = lines.join('\n');
+        vscode.env.clipboard.writeText(report).then(() => {
+            webviewPanel.webview.postMessage({ command: 'reportCopied' });
+            this.outputChannel.appendLine('[HeapLens] Incident report copied to clipboard');
+        });
     }
 
     private async handleGoToSource(className: string, webviewPanel: vscode.WebviewPanel): Promise<void> {

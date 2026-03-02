@@ -349,6 +349,123 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         }
         .source-toast.visible { opacity: 1; }
 
+        /* GC Root Path Breadcrumb */
+        .gc-path-breadcrumb {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 10px 16px;
+            margin-bottom: 12px;
+            background: var(--vscode-editorWidget-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 6px;
+            overflow-x: auto;
+            white-space: nowrap;
+            position: relative;
+        }
+        .gc-path-label {
+            font-size: 11px;
+            font-weight: bold;
+            text-transform: uppercase;
+            opacity: 0.6;
+            margin-right: 8px;
+            flex-shrink: 0;
+        }
+        .gc-path-node {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            background: var(--vscode-badge-background);
+            color: var(--vscode-badge-foreground);
+            flex-shrink: 0;
+        }
+        .gc-path-node.root {
+            background: var(--vscode-testing-iconPassed, #388a34);
+            color: #fff;
+        }
+        .gc-path-node.target {
+            background: var(--vscode-editorError-foreground);
+            color: #fff;
+        }
+        .gc-path-arrow {
+            opacity: 0.4;
+            font-size: 11px;
+            flex-shrink: 0;
+        }
+        .gc-path-close {
+            position: absolute;
+            right: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            cursor: pointer;
+            opacity: 0.5;
+            font-size: 14px;
+            padding: 2px 6px;
+            border: none;
+            background: none;
+            color: var(--vscode-foreground);
+        }
+        .gc-path-close:hover { opacity: 1; }
+        .tree-pin {
+            margin-left: 6px;
+            flex-shrink: 0;
+            cursor: pointer;
+            opacity: 0;
+            font-size: 12px;
+            transition: opacity 0.15s;
+        }
+        .tree-row:hover .tree-pin { opacity: 0.6; }
+        .tree-pin:hover { opacity: 1 !important; }
+
+        /* Auto-Diagnosis cards */
+        .diagnosis-section { margin-bottom: 20px; }
+        .diagnosis-card {
+            padding: 12px 16px;
+            margin-bottom: 8px;
+            border-radius: 6px;
+            font-size: 13px;
+            border-left: 4px solid var(--vscode-panel-border);
+            background: var(--vscode-editorWidget-background);
+        }
+        .diagnosis-card.critical {
+            border-left-color: var(--vscode-editorError-foreground);
+            background: color-mix(in srgb, var(--vscode-editorError-foreground) 8%, var(--vscode-editorWidget-background));
+        }
+        .diagnosis-card.warning {
+            border-left-color: var(--vscode-editorWarning-foreground);
+            background: color-mix(in srgb, var(--vscode-editorWarning-foreground) 8%, var(--vscode-editorWidget-background));
+        }
+        .diagnosis-card.info {
+            border-left-color: var(--vscode-focusBorder);
+        }
+        .diagnosis-severity {
+            font-size: 10px;
+            font-weight: bold;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+        .diagnosis-card.critical .diagnosis-severity { color: var(--vscode-editorError-foreground); }
+        .diagnosis-card.warning .diagnosis-severity { color: var(--vscode-editorWarning-foreground); }
+        .diagnosis-card.info .diagnosis-severity { color: var(--vscode-focusBorder); }
+        .diagnosis-title { font-weight: bold; margin-bottom: 4px; }
+        .diagnosis-detail { opacity: 0.8; font-size: 12px; }
+
+        /* Report button */
+        #report-actions {
+            display: none;
+            margin-bottom: 16px;
+        }
+        .report-copied {
+            display: inline-block;
+            margin-left: 8px;
+            font-size: 12px;
+            color: var(--vscode-testing-iconPassed, #388a34);
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        .report-copied.visible { opacity: 1; }
+
         /* Source tab */
         .source-status {
             display: inline-block;
@@ -396,6 +513,11 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         <div class="stats-bar" id="stats-bar">
             <div class="loading">Waiting for analysis...</div>
         </div>
+        <div id="report-actions">
+            <button class="btn" id="copy-report-btn">Copy Incident Report</button>
+            <span class="report-copied" id="report-copied">Copied!</span>
+        </div>
+        <div id="diagnosis-section" class="diagnosis-section"></div>
         <div class="section-title">Top Objects by Retained Size</div>
         <div id="top-objects-table"></div>
         <div class="section-title">Heap Composition</div>
@@ -454,6 +576,7 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         </div>
     </div>
 
+    <div id="gc-path-container"></div>
     <div class="source-toast" id="source-toast"></div>
 
     <script src="${d3Uri}"></script>
@@ -513,6 +636,12 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     updateDependencyBadges(msg.className, msg.tier, msg.dependency);
                     sourceStatusMap[msg.className] = 'found';
                     updateSourceRow(msg.className);
+                    break;
+                case 'gcRootPathResponse':
+                    renderGcRootPath(msg.path);
+                    break;
+                case 'reportCopied':
+                    showReportCopied();
                     break;
                 case 'error':
                     showError(msg.message);
@@ -630,6 +759,12 @@ export function getWebviewContent(_webview: vscode.Webview): string {
 
             // Pie chart
             renderPieChart(objs);
+
+            // Show report button
+            document.getElementById('report-actions').style.display = 'block';
+
+            // Auto-diagnosis
+            renderDiagnosis(data);
         }
 
         function renderPieChart(objs) {
@@ -754,6 +889,8 @@ export function getWebviewContent(_webview: vscode.Webview): string {
             const cachedDep = depInfoCache[displayName];
             const depBadge = cachedDep ? makeBadgeHtml(cachedDep.tier, cachedDep.dependency) : '';
 
+            const showPin = obj.object_id > 0;
+
             row.innerHTML =
                 '<span class="tree-toggle">' + (leaf ? '' : '▶') + '</span>' +
                 '<span class="tree-name">' + escapeHtml(displayName) + '</span>' +
@@ -762,6 +899,7 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                 '<span class="tree-size">' + fmt(obj.retained_size) + '</span>' +
                 '<span class="tree-bar-wrap"><div class="tree-bar" style="width:' + barWidth + '%"></div></span>' +
                 '<span class="tree-pct">' + pctStr + '%</span>' +
+                (showPin ? '<span class="tree-pin" title="Show GC root path">&#x1F4CD;</span>' : '') +
                 (showSource ? '<span class="tree-source" title="Go to source">&#8599;</span>' : '') +
                 depBadge;
 
@@ -777,6 +915,13 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                         toggle.textContent = '⏳';
                         vscode.postMessage({ command: 'getChildren', objectId: obj.object_id });
                     }
+                });
+            }
+
+            if (showPin) {
+                row.querySelector('.tree-pin').addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    vscode.postMessage({ command: 'gcRootPath', objectId: obj.object_id });
                 });
             }
 
@@ -1051,6 +1196,9 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                 const sourceLink = isResolvableClass(s.class_name)
                     ? ' | <a class="go-to-source-link" data-class="' + escapeHtml(s.class_name) + '">View Source</a>'
                     : '';
+                const gcPathLink = s.object_id
+                    ? ' | <a class="gc-path-link" data-object-id="' + s.object_id + '" style="cursor:pointer;color:var(--vscode-textLink-foreground);">GC Path</a>'
+                    : '';
                 const cachedDep = depInfoCache[s.class_name];
                 const depBadge = cachedDep ? makeBadgeHtml(cachedDep.tier, cachedDep.dependency) : '';
                 return '<div class="suspect-card ' + severity + '" data-class="' + escapeHtml(s.class_name) + '">' +
@@ -1061,7 +1209,7 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     '<div class="suspect-desc">' + escapeHtml(s.description) + '</div>' +
                     '<div style="margin-top:8px;opacity:0.6;font-size:12px;">Retained: ' + fmt(s.retained_size) +
                     (s.object_id ? ' | Object ID: ' + s.object_id : '') +
-                    sourceLink + depBadge + '</div>' +
+                    sourceLink + gcPathLink + depBadge + '</div>' +
                     '</div>';
             }).join('');
 
@@ -1072,6 +1220,177 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     vscode.postMessage({ command: 'goToSource', className: link.dataset.class });
                 });
             });
+
+            // Wire up "GC Path" click handlers
+            container.querySelectorAll('.gc-path-link').forEach(link => {
+                link.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    const objectId = parseInt(link.dataset.objectId, 10);
+                    if (objectId) vscode.postMessage({ command: 'gcRootPath', objectId: objectId });
+                });
+            });
+        }
+        // ---- GC Root Path ----
+        function renderGcRootPath(path) {
+            const container = document.getElementById('gc-path-container');
+            if (!path || path.length === 0) {
+                container.innerHTML = '<div class="gc-path-breadcrumb"><span class="gc-path-label">GC Path</span><span style="opacity:0.5;font-size:12px;">No path to GC root found</span><button class="gc-path-close" onclick="document.getElementById(\'gc-path-container\').innerHTML=\'\'">&times;</button></div>';
+                return;
+            }
+
+            let html = '<div class="gc-path-breadcrumb"><span class="gc-path-label">GC Path</span>';
+            path.forEach(function(node, i) {
+                const isRoot = node.node_type === 'Root' || node.node_type === 'SuperRoot';
+                const isTarget = i === path.length - 1;
+                const cls = isRoot ? 'root' : isTarget ? 'target' : '';
+                const label = node.class_name || node.node_type;
+                const title = label + ' (' + fmt(node.retained_size) + ')';
+                if (i > 0) html += '<span class="gc-path-arrow">&#9654;</span>';
+                html += '<span class="gc-path-node ' + cls + '" title="' + escapeHtml(title) + '">' + escapeHtml(label) + '</span>';
+            });
+            html += '<button class="gc-path-close" onclick="document.getElementById(\'gc-path-container\').innerHTML=\'\'">&times;</button></div>';
+            container.innerHTML = html;
+        }
+
+        // ---- Incident Report ----
+        document.getElementById('copy-report-btn').addEventListener('click', function() {
+            vscode.postMessage({ command: 'copyReport' });
+        });
+
+        function showReportCopied() {
+            const el = document.getElementById('report-copied');
+            el.classList.add('visible');
+            setTimeout(function() { el.classList.remove('visible'); }, 3000);
+        }
+
+        // ---- Auto-Diagnosis ----
+        function getRecommendation(className, severity) {
+            const cn = className.toLowerCase();
+            if (cn.indexOf('cache') !== -1 || cn.indexOf('cach') !== -1) {
+                return severity === 'critical'
+                    ? 'Cache is consuming excessive memory. Check eviction policy, consider bounded caches (LRU/LFU), or reduce max size.'
+                    : 'Review cache eviction settings and TTL configuration.';
+            }
+            if (cn.indexOf('pool') !== -1 || cn.indexOf('connection') !== -1 || cn.indexOf('datasource') !== -1) {
+                return 'Check for connection leaks. Ensure connections are closed after use. Review pool max size and idle timeout settings.';
+            }
+            if (cn.indexOf('session') !== -1 || cn.indexOf('httpsession') !== -1) {
+                return 'Check session timeout settings. Look for session attributes storing large objects. Consider session size limits.';
+            }
+            if (cn.indexOf('queue') !== -1 || cn.indexOf('buffer') !== -1 || cn.indexOf('blocking') !== -1) {
+                return 'Possible backpressure issue. Check consumer throughput, queue capacity limits, and producer rate.';
+            }
+            if (cn.indexOf('thread') !== -1) {
+                return 'Check for thread pool exhaustion or thread-local leaks. Review pool sizing.';
+            }
+            if (cn === 'byte[]' || cn === 'char[]') {
+                return severity === 'critical'
+                    ? 'Large byte/char arrays suggest buffering or serialization issues. Check for unclosed streams, large response bodies, or excessive string operations.'
+                    : 'Review buffer sizes and ensure streams are properly closed.';
+            }
+            if (severity === 'critical') {
+                return 'This class retains a very large portion of the heap. Investigate why these objects are not being garbage collected.';
+            }
+            return 'Consider if the number of instances and retained size are expected for your application workload.';
+        }
+
+        function renderDiagnosis(data) {
+            const section = document.getElementById('diagnosis-section');
+            if (!data.summary || !data.classHistogram) {
+                section.innerHTML = '';
+                return;
+            }
+
+            const totalHeap = data.summary.total_heap_size;
+            if (totalHeap === 0) { section.innerHTML = ''; return; }
+
+            const findings = [];
+
+            // Check leak suspects
+            const suspects = data.leakSuspects || [];
+            suspects.forEach(function(s) {
+                if (s.retained_percentage > 50) {
+                    findings.push({
+                        severity: 'critical',
+                        title: s.class_name + ' retains ' + s.retained_percentage.toFixed(1) + '% of heap',
+                        detail: getRecommendation(s.class_name, 'critical')
+                    });
+                } else if (s.retained_percentage > 20) {
+                    findings.push({
+                        severity: 'warning',
+                        title: s.class_name + ' retains ' + s.retained_percentage.toFixed(1) + '% of heap',
+                        detail: getRecommendation(s.class_name, 'warning')
+                    });
+                }
+            });
+
+            // Check class histogram patterns
+            const histogram = data.classHistogram || [];
+            histogram.forEach(function(entry) {
+                const pct = (entry.retained_size / totalHeap) * 100;
+                const cn = entry.class_name;
+                const cnLower = cn.toLowerCase();
+
+                // byte[]/char[] > 20% of heap
+                if ((cn === 'byte[]' || cn === 'char[]') && pct > 20) {
+                    const alreadyReported = findings.some(function(f) { return f.title.indexOf(cn) !== -1; });
+                    if (!alreadyReported) {
+                        findings.push({
+                            severity: 'warning',
+                            title: cn + ' occupies ' + pct.toFixed(1) + '% of heap',
+                            detail: getRecommendation(cn, 'warning')
+                        });
+                    }
+                }
+
+                // Pattern matching for known problematic classes
+                if (pct > 10) {
+                    const patterns = ['cache', 'pool', 'connection', 'session', 'queue', 'buffer'];
+                    patterns.forEach(function(pat) {
+                        if (cnLower.indexOf(pat) !== -1) {
+                            const alreadyReported = findings.some(function(f) { return f.title.indexOf(cn) !== -1; });
+                            if (!alreadyReported) {
+                                findings.push({
+                                    severity: pct > 30 ? 'critical' : 'warning',
+                                    title: cn + ' pattern detected (' + pct.toFixed(1) + '% heap)',
+                                    detail: getRecommendation(cn, pct > 30 ? 'critical' : 'warning')
+                                });
+                            }
+                        }
+                    });
+                }
+
+                // Instance count > 100K with > 3% heap
+                if (entry.instance_count > 100000 && pct > 3) {
+                    const alreadyReported = findings.some(function(f) { return f.title.indexOf(cn) !== -1; });
+                    if (!alreadyReported) {
+                        findings.push({
+                            severity: 'info',
+                            title: fmtNum(entry.instance_count) + ' instances of ' + cn + ' (' + pct.toFixed(1) + '% heap)',
+                            detail: 'High instance count may indicate object accumulation. Check if objects are being properly released.'
+                        });
+                    }
+                }
+            });
+
+            // Sort: critical > warning > info
+            const order = { critical: 0, warning: 1, info: 2 };
+            findings.sort(function(a, b) { return order[a.severity] - order[b.severity]; });
+
+            if (findings.length === 0) {
+                section.innerHTML = '';
+                return;
+            }
+
+            let html = '<div class="section-title">Auto-Diagnosis</div>';
+            findings.forEach(function(f) {
+                html += '<div class="diagnosis-card ' + f.severity + '">' +
+                    '<div class="diagnosis-severity">' + f.severity.toUpperCase() + '</div>' +
+                    '<div class="diagnosis-title">' + escapeHtml(f.title) + '</div>' +
+                    '<div class="diagnosis-detail">' + escapeHtml(f.detail) + '</div>' +
+                    '</div>';
+            });
+            section.innerHTML = html;
         }
     })();
     </script>

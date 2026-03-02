@@ -1493,6 +1493,9 @@ pub struct AnalysisState {
     pub leak_suspects: Vec<LeakSuspect>,
     /// Heap summary statistics.
     pub summary: HeapSummary,
+    /// Reverse reference adjacency list: for each node, who references it in the original heap graph.
+    /// Used for BFS backward traversal to find GC root paths.
+    pub reverse_refs: HashMap<NodeIndex, Vec<NodeIndex>>,
 }
 
 impl AnalysisState {
@@ -1548,6 +1551,101 @@ impl AnalysisState {
 
         children_reports.sort();
         Some(children_reports)
+    }
+
+    /// Finds the shortest reference chain from a GC root to the given object.
+    ///
+    /// BFS backward from the target through `reverse_refs` (original heap graph edges),
+    /// stopping at a Root or SuperRoot node. Returns the path from root to target.
+    ///
+    /// # Arguments
+    ///
+    /// * `object_id` - The HPROF object ID of the target object
+    /// * `max_depth` - Maximum BFS depth to prevent runaway traversal
+    ///
+    /// # Returns
+    ///
+    /// A path of `ObjectReport` nodes from root to target, or `None` if no path exists.
+    pub fn gc_root_path(&self, object_id: u64, max_depth: usize) -> Option<Vec<ObjectReport>> {
+        // Find the target node
+        let target_idx = *self.id_to_node.get(&object_id)?;
+
+        // BFS backward from target through reverse_refs
+        let mut queue = std::collections::VecDeque::new();
+        let mut came_from: HashMap<NodeIndex, Option<NodeIndex>> = HashMap::new();
+
+        queue.push_back(target_idx);
+        came_from.insert(target_idx, None);
+
+        let mut found_root: Option<NodeIndex> = None;
+
+        while let Some(current) = queue.pop_front() {
+            // Check if this is a Root or SuperRoot
+            let (_, node_type, _) = self.node_data_map.get(&current)
+                .cloned()
+                .unwrap_or((0, "Unknown".to_string(), String::new()));
+
+            if node_type == "Root" || node_type == "SuperRoot" {
+                found_root = Some(current);
+                break;
+            }
+
+            // Check depth limit
+            let mut depth = 0;
+            let mut check = current;
+            while let Some(Some(prev)) = came_from.get(&check) {
+                depth += 1;
+                check = *prev;
+                if depth > max_depth {
+                    break;
+                }
+            }
+            if depth >= max_depth {
+                continue;
+            }
+
+            // Expand backward: who references current?
+            if let Some(referrers) = self.reverse_refs.get(&current) {
+                for &referrer in referrers {
+                    if !came_from.contains_key(&referrer) {
+                        came_from.insert(referrer, Some(current));
+                        queue.push_back(referrer);
+                    }
+                }
+            }
+        }
+
+        let root_idx = found_root?;
+
+        // Reconstruct path from root to target
+        let mut path = Vec::new();
+        let mut current = root_idx;
+        loop {
+            let (obj_id, node_type, class_name) = self.node_data_map.get(&current)
+                .cloned()
+                .unwrap_or((0, "Unknown".to_string(), String::new()));
+            let shallow = self.shallow_sizes.get(&current).copied().unwrap_or(0);
+            let retained = self.retained_sizes.get(&current).copied().unwrap_or(0);
+            path.push(ObjectReport::new(obj_id, node_type, class_name, shallow, retained, current));
+
+            if current == target_idx {
+                break;
+            }
+
+            // came_from[current] = Some(next_node_toward_target)
+            // Since BFS expanded backward from target, came_from[node] points
+            // toward the target along the discovered path.
+            match came_from.get(&current) {
+                Some(Some(next)) => current = *next,
+                _ => break,
+            }
+        }
+
+        if path.len() < 2 {
+            return None;
+        }
+
+        Some(path)
     }
 
     /// Gets the top N layers of the dominator tree starting from SuperRoot.
@@ -1633,6 +1731,15 @@ pub fn calculate_dominators_with_state(graph: &HeapGraph) -> Result<(Vec<ObjectR
     // Step 1: Compute dominator tree
     let dominators = dominators::simple_fast(petgraph, super_root);
     log::info!("Dominator tree computed successfully");
+
+    // Step 1b: Build reverse reference adjacency list from original graph edges
+    let mut reverse_refs: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
+    for edge in petgraph.edge_indices() {
+        if let Some((source, target)) = petgraph.edge_endpoints(edge) {
+            reverse_refs.entry(target).or_insert_with(Vec::new).push(source);
+        }
+    }
+    log::info!("Built reverse reference map: {} entries", reverse_refs.len());
 
     // Step 2: Build children map
     // Nodes unreachable from SuperRoot (no immediate dominator) are attached
@@ -1840,6 +1947,7 @@ pub fn calculate_dominators_with_state(graph: &HeapGraph) -> Result<(Vec<ObjectR
         class_histogram,
         leak_suspects,
         summary,
+        reverse_refs,
     };
 
     Ok((top_50, state))
@@ -1982,5 +2090,137 @@ mod tests {
         assert_eq!(mmap[mmap.len() - 1], 0x42);
 
         log::info!("Successfully mapped large file: {} bytes", mmap.len());
+    }
+
+    /// Helper to build a minimal AnalysisState for GC root path testing.
+    fn make_test_state(
+        edges: &[(NodeIndex, NodeIndex)],
+        node_data: &[(NodeIndex, u64, &str, &str)], // (idx, object_id, node_type, class_name)
+        super_root: NodeIndex,
+    ) -> AnalysisState {
+        let mut reverse_refs: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
+        let mut children_map: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
+        let mut id_to_node: HashMap<u64, NodeIndex> = HashMap::new();
+        let mut node_data_map: HashMap<NodeIndex, (u64, String, String)> = HashMap::new();
+        let mut shallow_sizes: HashMap<NodeIndex, u64> = HashMap::new();
+        let mut retained_sizes: HashMap<NodeIndex, u64> = HashMap::new();
+
+        for &(src, tgt) in edges {
+            reverse_refs.entry(tgt).or_insert_with(Vec::new).push(src);
+            children_map.entry(src).or_insert_with(Vec::new).push(tgt);
+        }
+
+        for &(idx, object_id, node_type, class_name) in node_data {
+            node_data_map.insert(idx, (object_id, node_type.to_string(), class_name.to_string()));
+            if object_id > 0 {
+                id_to_node.insert(object_id, idx);
+            }
+            shallow_sizes.insert(idx, 100);
+            retained_sizes.insert(idx, 200);
+        }
+
+        AnalysisState {
+            children_map,
+            retained_sizes,
+            shallow_sizes,
+            id_to_node,
+            super_root,
+            node_data_map,
+            class_histogram: vec![],
+            leak_suspects: vec![],
+            summary: HeapSummary {
+                total_heap_size: 1000,
+                total_instances: 5,
+                total_classes: 1,
+                total_arrays: 0,
+                total_gc_roots: 1,
+            },
+            reverse_refs,
+        }
+    }
+
+    /// Test GC root path: SuperRoot→Root→A→B→C, query C → path of ≥3 nodes
+    #[test]
+    fn test_gc_root_path_simple() {
+        let sr = NodeIndex::new(0);
+        let root = NodeIndex::new(1);
+        let a = NodeIndex::new(2);
+        let b = NodeIndex::new(3);
+        let c = NodeIndex::new(4);
+
+        let state = make_test_state(
+            &[(sr, root), (root, a), (a, b), (b, c)],
+            &[
+                (sr, 0, "SuperRoot", ""),
+                (root, 0, "Root", ""),
+                (a, 100, "Instance", "com.example.A"),
+                (b, 200, "Instance", "com.example.B"),
+                (c, 300, "Instance", "com.example.C"),
+            ],
+            sr,
+        );
+
+        let path = state.gc_root_path(300, 100);
+        assert!(path.is_some(), "Expected a path to object 300");
+        let path = path.unwrap();
+        assert!(path.len() >= 3, "Path should have at least 3 nodes, got {}", path.len());
+        // First node should be Root or SuperRoot
+        assert!(
+            path[0].node_type == "Root" || path[0].node_type == "SuperRoot",
+            "Path should start at a root, got: {}",
+            path[0].node_type
+        );
+        // Last node should be our target
+        assert_eq!(path.last().unwrap().object_id, 300);
+    }
+
+    /// Test GC root path: isolated node with no incoming edges → None
+    #[test]
+    fn test_gc_root_path_not_found() {
+        let sr = NodeIndex::new(0);
+        let root = NodeIndex::new(1);
+        let isolated = NodeIndex::new(2);
+
+        let state = make_test_state(
+            &[(sr, root)], // isolated has no edges
+            &[
+                (sr, 0, "SuperRoot", ""),
+                (root, 0, "Root", ""),
+                (isolated, 999, "Instance", "com.example.Isolated"),
+            ],
+            sr,
+        );
+
+        let path = state.gc_root_path(999, 100);
+        assert!(path.is_none(), "Expected None for isolated node");
+    }
+
+    /// Test GC root path: Root→A directly → 2-element path
+    #[test]
+    fn test_gc_root_path_direct_child() {
+        let sr = NodeIndex::new(0);
+        let root = NodeIndex::new(1);
+        let a = NodeIndex::new(2);
+
+        let state = make_test_state(
+            &[(sr, root), (root, a)],
+            &[
+                (sr, 0, "SuperRoot", ""),
+                (root, 0, "Root", ""),
+                (a, 42, "Instance", "com.example.Direct"),
+            ],
+            sr,
+        );
+
+        let path = state.gc_root_path(42, 100);
+        assert!(path.is_some(), "Expected a path to object 42");
+        let path = path.unwrap();
+        assert_eq!(path.len(), 2, "Direct child should have 2-element path");
+        assert!(
+            path[0].node_type == "Root",
+            "First element should be Root, got: {}",
+            path[0].node_type
+        );
+        assert_eq!(path[1].object_id, 42);
     }
 }
