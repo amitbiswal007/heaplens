@@ -579,9 +579,24 @@ impl HeapGraph {
     }
 
     /// Consumes the HeapGraph and returns its parts, avoiding clones.
-    pub fn into_parts(self) -> (Graph<NodeData, (), Directed>, HashMap<u64, NodeIndex>, NodeIndex, HeapSummary, std::collections::HashSet<u64>) {
-        (self.graph, self.id_to_node, self.super_root, self.summary, self.classloader_ids)
+    pub fn into_parts(self) -> HeapGraphParts {
+        HeapGraphParts {
+            graph: self.graph,
+            id_to_node: self.id_to_node,
+            super_root: self.super_root,
+            summary: self.summary,
+            classloader_ids: self.classloader_ids,
+        }
     }
+}
+
+/// Parts of a HeapGraph after consumption, used by dominator analysis.
+pub struct HeapGraphParts {
+    pub graph: Graph<NodeData, (), Directed>,
+    pub id_to_node: HashMap<u64, NodeIndex>,
+    pub super_root: NodeIndex,
+    pub summary: HeapSummary,
+    pub classloader_ids: std::collections::HashSet<u64>,
 }
 
 /// Builds a graph representation of the Java heap from HPROF file data.
@@ -703,6 +718,9 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
         }
     }
     log::info!("Built class name map: {} entries, {} class nodes", class_name_map.len(), class_count);
+    drop(string_table); // Free string table memory — no longer needed
+    let num_classes = load_class_entries.len();
+    drop(load_class_entries);
 
     // ============================================================================
     // PASS 1: Identify all nodes and add them to the graph
@@ -717,7 +735,6 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
     let mut total_shallow_size = 0u64;
 
     // Also build a map of class_obj_id -> instance_size from Class sub-records
-    let num_classes = load_class_entries.len();
     let mut class_instance_sizes: HashMap<u64, u32> = HashMap::with_capacity(num_classes);
 
     // Collect field descriptors and superclass info for typed reference extraction
@@ -749,8 +766,9 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
                         let super_id = class.super_class_obj_id().map(|id| id.id());
                         let mut own_field_types = Vec::new();
                         for fd_result in class.instance_field_descriptors() {
-                            if let Ok(fd) = fd_result {
-                                own_field_types.push(fd.field_type());
+                            match fd_result {
+                                Ok(fd) => own_field_types.push(fd.field_type()),
+                                Err(e) => log::warn!("Failed to parse field descriptor in class 0x{:x}: {:?}", obj_id, e),
                             }
                         }
                         class_field_info.insert(obj_id, ClassFieldInfo {
@@ -787,7 +805,8 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
         let mut visited = std::collections::HashSet::new();
         while let Some(cid) = current_id {
             if !visited.insert(cid) {
-                break; // cycle protection
+                log::warn!("Cycle detected in class hierarchy at class 0x{:x}", cid);
+                break;
             }
             if class_field_layouts.contains_key(&cid) {
                 break; // parent already resolved — use its cached layout
@@ -819,6 +838,7 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
         }
     }
     log::info!("Resolved field layouts for {} classes", class_field_layouts.len());
+    drop(class_field_info); // Free field descriptor data — resolved into layouts
 
     // Main heap dump scan
     for record_result in hprof.records_iter() {
@@ -1053,13 +1073,17 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
     log::debug!("Pass 2: Adding edges (references)...");
 
     let mut edge_count = 0;
+    // Use HashSet for O(1) edge deduplication instead of graph.contains_edge() which is O(E)
+    let mut added_edges: std::collections::HashSet<(NodeIndex, NodeIndex)> =
+        std::collections::HashSet::with_capacity(estimated_nodes * 2);
 
     // Connect SuperRoot to all GC roots
     for gc_root_id in &gc_root_ids {
         if let Some(&root_node) = id_to_node.get(gc_root_id) {
-            graph.add_edge(super_root, root_node, ());
-            edge_count += 1;
-            log::trace!("Connected SuperRoot -> GC Root: ID={}", gc_root_id);
+            if added_edges.insert((super_root, root_node)) {
+                graph.add_edge(super_root, root_node, ());
+                edge_count += 1;
+            }
         }
     }
 
@@ -1087,16 +1111,15 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
                         jvm_hprof::heap_dump::SubRecord::Instance(instance) => {
                             let instance_id = instance.obj_id().id();
                             let class_obj_id = instance.class_obj_id().id();
-                            let instance_node = id_to_node.get(&instance_id);
 
-                            if let Some(&instance_idx) = instance_node {
+                            if let Some(&instance_idx) = id_to_node.get(&instance_id) {
                                 let fields = instance.fields();
 
                                 if let Some(field_types) = class_field_layouts.get(&class_obj_id) {
                                     typed_instance_count += 1;
                                     extract_typed_references(fields, id_size, field_types, |ref_id| {
                                         if let Some(&ref_node) = id_to_node.get(&ref_id) {
-                                            if !graph.contains_edge(instance_idx, ref_node) {
+                                            if added_edges.insert((instance_idx, ref_node)) {
                                                 graph.add_edge(instance_idx, ref_node, ());
                                                 edge_count += 1;
                                             }
@@ -1104,10 +1127,9 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
                                     });
                                 } else {
                                     fallback_instance_count += 1;
-                                    log::trace!("No field layout for class 0x{:x}, using fallback for instance {}", class_obj_id, instance_id);
                                     extract_object_references_fallback(fields, id_size, |ref_id| {
                                         if let Some(&ref_node) = id_to_node.get(&ref_id) {
-                                            if !graph.contains_edge(instance_idx, ref_node) {
+                                            if added_edges.insert((instance_idx, ref_node)) {
                                                 graph.add_edge(instance_idx, ref_node, ());
                                                 edge_count += 1;
                                             }
@@ -1119,47 +1141,30 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
                         // Array references: parse array contents for object references
                         jvm_hprof::heap_dump::SubRecord::ObjectArray(array) => {
                             let array_id = array.obj_id().id();
-                            let array_node = id_to_node.get(&array_id);
-                            
-                            if let Some(&array_idx) = array_node {
-                                // ObjectArray contents are object IDs
-                                // Extract references using the elements() iterator
-                                let mut ref_count = 0;
+
+                            if let Some(&array_idx) = id_to_node.get(&array_id) {
                                 for element_result in array.elements(id_size) {
-                                    match element_result {
-                                        Ok(Some(element_id)) => {
-                                            let ref_id = element_id.id();
-                                            if let Some(&ref_node) = id_to_node.get(&ref_id) {
-                                                if !graph.contains_edge(array_idx, ref_node) {
-                                                    graph.add_edge(array_idx, ref_node, ());
-                                                    edge_count += 1;
-                                                    log::trace!("Added edge: Array {} -> Object {}", array_id, ref_id);
-                                                }
+                                    if let Ok(Some(element_id)) = element_result {
+                                        let ref_id = element_id.id();
+                                        if let Some(&ref_node) = id_to_node.get(&ref_id) {
+                                            if added_edges.insert((array_idx, ref_node)) {
+                                                graph.add_edge(array_idx, ref_node, ());
+                                                edge_count += 1;
                                             }
-                                            ref_count += 1;
-                                        }
-                                        Ok(None) => {
-                                            // Null reference, skip
-                                        }
-                                        Err(_) => {
-                                            // Parse error, skip this element
-                                            log::trace!("Failed to parse element in ObjectArray {}", array_id);
                                         }
                                     }
                                 }
-                                log::trace!("ObjectArray {} has {} elements", array_id, ref_count);
                             }
                         }
                         // Class references: superclass, class loader, and static ObjectId fields
                         jvm_hprof::heap_dump::SubRecord::Class(class) => {
                             let class_id = class.obj_id().id();
-                            let class_node = id_to_node.get(&class_id);
 
-                            if let Some(&class_idx) = class_node {
+                            if let Some(&class_idx) = id_to_node.get(&class_id) {
                                 // Reference to superclass
                                 if let Some(super_class_id) = class.super_class_obj_id() {
                                     if let Some(&super_class_node) = id_to_node.get(&super_class_id.id()) {
-                                        if !graph.contains_edge(class_idx, super_class_node) {
+                                        if added_edges.insert((class_idx, super_class_node)) {
                                             graph.add_edge(class_idx, super_class_node, ());
                                             edge_count += 1;
                                         }
@@ -1169,7 +1174,7 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
                                 // Reference to class loader
                                 if let Some(class_loader_id) = class.class_loader_obj_id() {
                                     if let Some(&class_loader_node) = id_to_node.get(&class_loader_id.id()) {
-                                        if !graph.contains_edge(class_idx, class_loader_node) {
+                                        if added_edges.insert((class_idx, class_loader_node)) {
                                             graph.add_edge(class_idx, class_loader_node, ());
                                             edge_count += 1;
                                         }
@@ -1178,19 +1183,24 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
 
                                 // References from static ObjectId fields
                                 for static_field_result in class.static_fields() {
-                                    if let Ok(static_field) = static_field_result {
-                                        if matches!(static_field.field_type(), jvm_hprof::heap_dump::FieldType::ObjectId) {
-                                            if let jvm_hprof::heap_dump::FieldValue::ObjectId(Some(ref_id)) = static_field.value() {
-                                                let ref_id_val = ref_id.id();
-                                                if ref_id_val != 0 {
-                                                    if let Some(&ref_node) = id_to_node.get(&ref_id_val) {
-                                                        if !graph.contains_edge(class_idx, ref_node) {
-                                                            graph.add_edge(class_idx, ref_node, ());
-                                                            edge_count += 1;
+                                    match static_field_result {
+                                        Ok(static_field) => {
+                                            if matches!(static_field.field_type(), jvm_hprof::heap_dump::FieldType::ObjectId) {
+                                                if let jvm_hprof::heap_dump::FieldValue::ObjectId(Some(ref_id)) = static_field.value() {
+                                                    let ref_id_val = ref_id.id();
+                                                    if ref_id_val != 0 {
+                                                        if let Some(&ref_node) = id_to_node.get(&ref_id_val) {
+                                                            if added_edges.insert((class_idx, ref_node)) {
+                                                                graph.add_edge(class_idx, ref_node, ());
+                                                                edge_count += 1;
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
+                                        }
+                                        Err(e) => {
+                                            log::warn!("Failed to parse static field in class 0x{:x}: {:?}", class_id, e);
                                         }
                                     }
                                 }
@@ -1202,6 +1212,7 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
             }
         }
     }
+    drop(added_edges); // Free edge dedup set before dominator analysis
 
     log::info!("Pass 2 complete: added {} edges (typed: {} instances, fallback: {} instances)", edge_count, typed_instance_count, fallback_instance_count);
     log::info!(
@@ -1489,18 +1500,19 @@ pub fn calculate_dominators(graph: &HeapGraph) -> Result<Vec<ObjectReport>> {
     log::debug!("Built children map: {} nodes have children", children.len());
 
     // Steps 3+4: Calculate shallow sizes and initialize retained sizes in a single pass
-    let mut shallow_sizes: HashMap<NodeIndex, u64> = HashMap::with_capacity(node_count);
-    let mut retained_sizes: HashMap<NodeIndex, u64> = HashMap::with_capacity(node_count);
+    let mut shallow_sizes: Vec<u64> = vec![0u64; node_count];
+    let mut retained_sizes: Vec<u64> = vec![0u64; node_count];
 
     for node_idx in petgraph.node_indices() {
+        let i = node_idx.index();
         let node_data = &petgraph[node_idx];
         let shallow_size = match node_data {
             NodeData::SuperRoot | NodeData::Root | NodeData::Class => 0,
             NodeData::Instance { size, .. } => *size as u64,
             NodeData::Array { size, .. } => *size as u64,
         };
-        shallow_sizes.insert(node_idx, shallow_size);
-        retained_sizes.insert(node_idx, shallow_size);
+        shallow_sizes[i] = shallow_size;
+        retained_sizes[i] = shallow_size;
     }
 
     // DFS post-order: process children before parents in a single pass
@@ -1511,11 +1523,12 @@ pub fn calculate_dominators(graph: &HeapGraph) -> Result<Vec<ObjectReport>> {
         if processed {
             // All children are done — accumulate their retained sizes
             if let Some(node_children) = children.get(&node) {
-                let mut retained = shallow_sizes.get(&node).copied().unwrap_or(0);
+                let ni = node.index();
+                let mut retained = shallow_sizes[ni];
                 for &child in node_children {
-                    retained += retained_sizes.get(&child).copied().unwrap_or(0);
+                    retained += retained_sizes[child.index()];
                 }
-                retained_sizes.insert(node, retained);
+                retained_sizes[ni] = retained;
             }
         } else {
             if !visited.insert(node) {
@@ -1537,8 +1550,9 @@ pub fn calculate_dominators(graph: &HeapGraph) -> Result<Vec<ObjectReport>> {
 
     for node_idx in petgraph.node_indices() {
         let node_data = &petgraph[node_idx];
-        let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
-        let retained = retained_sizes.get(&node_idx).copied().unwrap_or(0);
+        let i = node_idx.index();
+        let shallow = shallow_sizes[i];
+        let retained = retained_sizes[i];
 
         let (object_id, node_type, class_name) = match node_data {
             NodeData::SuperRoot => (0, "SuperRoot".to_string(), String::new()),
@@ -1622,16 +1636,16 @@ pub struct HeapSummary {
 pub struct AnalysisState {
     /// Mapping from node index to its children in the dominator tree.
     pub children_map: HashMap<NodeIndex, Vec<NodeIndex>>,
-    /// Mapping from node index to retained size.
-    pub retained_sizes: HashMap<NodeIndex, u64>,
-    /// Mapping from node index to shallow size.
-    pub shallow_sizes: HashMap<NodeIndex, u64>,
+    /// Retained size per node, indexed by NodeIndex.index().
+    pub retained_sizes: Vec<u64>,
+    /// Shallow size per node, indexed by NodeIndex.index().
+    pub shallow_sizes: Vec<u64>,
     /// Mapping from HPROF object ID to node index.
     pub id_to_node: HashMap<u64, NodeIndex>,
     /// The super root node index.
     pub super_root: NodeIndex,
-    /// Mapping from node index to (object_id, node_type, class_name).
-    pub node_data_map: HashMap<NodeIndex, (u64, &'static str, Arc<str>)>,
+    /// Node data per node, indexed by NodeIndex.index(): (object_id, node_type, class_name).
+    pub node_data_map: Vec<(u64, &'static str, Arc<str>)>,
     /// Class histogram entries sorted by retained size.
     pub class_histogram: Vec<ClassHistogramEntry>,
     /// Detected leak suspects.
@@ -1668,13 +1682,16 @@ impl AnalysisState {
         let mut children_reports = Vec::new();
 
         for &child_idx in children_indices {
-            let (child_object_id, node_type, class_name) = match self.node_data_map.get(&child_idx) {
-                Some(&(id, nt, ref cn)) => (id, nt, cn.clone()),
-                None => (0, "Unknown", Arc::from("")),
+            let i = child_idx.index();
+            let (child_object_id, node_type, class_name) = if i < self.node_data_map.len() {
+                let (id, nt, ref cn) = self.node_data_map[i];
+                (id, nt, cn.clone())
+            } else {
+                (0, "Unknown", Arc::from(""))
             };
 
-            let shallow = self.shallow_sizes.get(&child_idx).copied().unwrap_or(0);
-            let retained = self.retained_sizes.get(&child_idx).copied().unwrap_or(0);
+            let shallow = self.shallow_sizes.get(i).copied().unwrap_or(0);
+            let retained = self.retained_sizes.get(i).copied().unwrap_or(0);
 
             // Filter out Class nodes and zero-size nodes
             if node_type == "Class" || retained == 0 {
@@ -1716,36 +1733,29 @@ impl AnalysisState {
         // Find the target node
         let target_idx = *self.id_to_node.get(&object_id)?;
 
-        // BFS backward from target through reverse_refs
-        let mut queue = std::collections::VecDeque::new();
+        // BFS backward from target through reverse_refs, with depth tracking
         let mut came_from: HashMap<NodeIndex, Option<NodeIndex>> = HashMap::new();
-
-        queue.push_back(target_idx);
         came_from.insert(target_idx, None);
 
         let mut found_root: Option<NodeIndex> = None;
 
-        while let Some(current) = queue.pop_front() {
+        let mut queue: std::collections::VecDeque<(NodeIndex, usize)> = std::collections::VecDeque::new();
+        queue.push_back((target_idx, 0));
+
+        while let Some((current, depth)) = queue.pop_front() {
             // Check if this is a Root or SuperRoot
-            let node_type = self.node_data_map.get(&current)
-                .map(|&(_, nt, _)| nt)
-                .unwrap_or("Unknown");
+            let i = current.index();
+            let node_type = if i < self.node_data_map.len() {
+                self.node_data_map[i].1
+            } else {
+                "Unknown"
+            };
 
             if node_type == "Root" || node_type == "SuperRoot" {
                 found_root = Some(current);
                 break;
             }
 
-            // Check depth limit
-            let mut depth = 0;
-            let mut check = current;
-            while let Some(Some(prev)) = came_from.get(&check) {
-                depth += 1;
-                check = *prev;
-                if depth > max_depth {
-                    break;
-                }
-            }
             if depth >= max_depth {
                 continue;
             }
@@ -1755,7 +1765,7 @@ impl AnalysisState {
                 for &referrer in referrers {
                     if !came_from.contains_key(&referrer) {
                         came_from.insert(referrer, Some(current));
-                        queue.push_back(referrer);
+                        queue.push_back((referrer, depth + 1));
                     }
                 }
             }
@@ -1767,12 +1777,15 @@ impl AnalysisState {
         let mut path = Vec::new();
         let mut current = root_idx;
         loop {
-            let (obj_id, node_type, class_name) = match self.node_data_map.get(&current) {
-                Some(&(id, nt, ref cn)) => (id, nt, cn.to_string()),
-                None => (0, "Unknown", String::new()),
+            let i = current.index();
+            let (obj_id, node_type, class_name) = if i < self.node_data_map.len() {
+                let (id, nt, ref cn) = self.node_data_map[i];
+                (id, nt, cn.to_string())
+            } else {
+                (0, "Unknown", String::new())
             };
-            let shallow = self.shallow_sizes.get(&current).copied().unwrap_or(0);
-            let retained = self.retained_sizes.get(&current).copied().unwrap_or(0);
+            let shallow = self.shallow_sizes.get(i).copied().unwrap_or(0);
+            let retained = self.retained_sizes.get(i).copied().unwrap_or(0);
             path.push(ObjectReport::new(obj_id, node_type.to_string(), class_name, shallow, retained, current));
 
             if current == target_idx {
@@ -1818,13 +1831,16 @@ impl AnalysisState {
                 break;
             }
 
-            let (object_id, node_type, class_name) = match self.node_data_map.get(&node_idx) {
-                Some(&(id, nt, ref cn)) => (id, nt, cn.to_string()),
-                None => (0, "Unknown", String::new()),
+            let i = node_idx.index();
+            let (object_id, node_type, class_name) = if i < self.node_data_map.len() {
+                let (id, nt, ref cn) = self.node_data_map[i];
+                (id, nt, cn.to_string())
+            } else {
+                (0, "Unknown", String::new())
             };
 
-            let shallow = self.shallow_sizes.get(&node_idx).copied().unwrap_or(0);
-            let retained = self.retained_sizes.get(&node_idx).copied().unwrap_or(0);
+            let shallow = self.shallow_sizes.get(i).copied().unwrap_or(0);
+            let retained = self.retained_sizes.get(i).copied().unwrap_or(0);
 
             if node_type == "Class" || (retained == 0 && node_type != "SuperRoot") {
                 if depth + 1 < max_depth {
@@ -1873,7 +1889,7 @@ impl AnalysisState {
 pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectReport>, AnalysisState)> {
     log::debug!("Calculating dominators with state for {} nodes", graph.node_count());
 
-    let (petgraph, id_to_node, super_root, mut summary, classloader_ids) = graph.into_parts();
+    let HeapGraphParts { graph: petgraph, id_to_node, super_root, mut summary, classloader_ids } = graph.into_parts();
 
     // Step 1: Compute dominator tree
     let dominators = dominators::simple_fast(&petgraph, super_root);
@@ -1916,19 +1932,19 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
     log::info!("Dominator tree: {} unreachable nodes ({:.2} MB) attached to SuperRoot",
         unreachable_count, unreachable_shallow_size as f64 / (1024.0 * 1024.0));
 
-    // Steps 3+4: Calculate shallow sizes and initialize retained sizes in a single pass
+    // Steps 3+4: Calculate shallow sizes and initialize retained sizes using Vec indexing
     let node_count = petgraph.node_count();
-    let mut shallow_sizes: HashMap<NodeIndex, u64> = HashMap::with_capacity(node_count);
-    let mut retained_sizes: HashMap<NodeIndex, u64> = HashMap::with_capacity(node_count);
+    let mut shallow_sizes: Vec<u64> = vec![0u64; node_count];
+    let mut retained_sizes: Vec<u64> = vec![0u64; node_count];
     for node_idx in petgraph.node_indices() {
-        let node_data = &petgraph[node_idx];
-        let shallow_size = match node_data {
+        let i = node_idx.index();
+        let shallow_size = match &petgraph[node_idx] {
             NodeData::SuperRoot | NodeData::Root | NodeData::Class => 0,
             NodeData::Instance { size, .. } => *size as u64,
             NodeData::Array { size, .. } => *size as u64,
         };
-        shallow_sizes.insert(node_idx, shallow_size);
-        retained_sizes.insert(node_idx, shallow_size);
+        shallow_sizes[i] = shallow_size;
+        retained_sizes[i] = shallow_size;
     }
 
     // DFS post-order: process children before parents in a single pass
@@ -1939,11 +1955,12 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
         if processed {
             // All children are done — accumulate their retained sizes
             if let Some(node_children) = children_map.get(&node) {
-                let mut retained = shallow_sizes.get(&node).copied().unwrap_or(0);
+                let ni = node.index();
+                let mut retained = shallow_sizes[ni];
                 for &child in node_children {
-                    retained += retained_sizes.get(&child).copied().unwrap_or(0);
+                    retained += retained_sizes[child.index()];
                 }
-                retained_sizes.insert(node, retained);
+                retained_sizes[ni] = retained;
             }
         } else {
             if !visited.insert(node) {
@@ -1960,20 +1977,25 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
         }
     }
 
-    log::info!("Calculated retained sizes for {} nodes", retained_sizes.len());
+    log::info!("Calculated retained sizes for {} nodes", node_count);
 
     // Steps 5+6: Build node_data_map, ObjectReports, and class histogram in a single pass
     // Use string interning for class names to reduce heap allocations
     let mut class_name_intern: HashMap<String, Arc<str>> = HashMap::new();
     let empty_class: Arc<str> = Arc::from("");
-    let mut node_data_map: HashMap<NodeIndex, (u64, &'static str, Arc<str>)> = HashMap::with_capacity(node_count);
+    let mut node_data_map: Vec<(u64, &'static str, Arc<str>)> = Vec::with_capacity(node_count);
+    // Initialize with defaults so we can index by node_idx.index()
+    for _ in 0..node_count {
+        node_data_map.push((0, "Unknown", empty_class.clone()));
+    }
     let mut reports: Vec<ObjectReport> = Vec::with_capacity(node_count);
     let mut histogram_map: HashMap<String, (u64, u64, u64)> = HashMap::new(); // (count, shallow, retained)
 
     for node_idx in petgraph.node_indices() {
+        let i = node_idx.index();
         let node_data = &petgraph[node_idx];
-        let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
-        let retained = retained_sizes.get(&node_idx).copied().unwrap_or(0);
+        let shallow = shallow_sizes[i];
+        let retained = retained_sizes[i];
 
         let (object_id, node_type, class_name_arc): (u64, &'static str, Arc<str>) = match node_data {
             NodeData::SuperRoot => (0, "SuperRoot", empty_class.clone()),
@@ -2011,7 +2033,7 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
             }
         };
 
-        node_data_map.insert(node_idx, (object_id, node_type, class_name_arc.clone()));
+        node_data_map[node_idx.index()] = (object_id, node_type, class_name_arc.clone());
 
         reports.push(ObjectReport::new(
             object_id,
@@ -2077,14 +2099,15 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
         let mut classloader_suspects: Vec<(NodeIndex, u64, f64, u64, String)> = Vec::new(); // (idx, retained, pct, obj_id, class_name)
         for &cl_id in &classloader_ids {
             if let Some(&node_idx) = id_to_node.get(&cl_id) {
-                let retained = retained_sizes.get(&node_idx).copied().unwrap_or(0);
+                let ni = node_idx.index();
+                let retained = retained_sizes[ni];
                 if retained < threshold_bytes {
                     continue;
                 }
                 let percentage = (retained as f64 / reachable_heap_size as f64) * 100.0;
-                let (object_id, class_name) = match node_data_map.get(&node_idx) {
-                    Some(&(id, _, ref cn)) => (id, cn.to_string()),
-                    None => continue,
+                let (object_id, class_name) = {
+                    let (id, _, ref cn) = node_data_map[ni];
+                    (id, cn.to_string())
                 };
                 // Skip bootstrap/system classloaders (empty class name or Root type)
                 if class_name.is_empty() {
@@ -2105,7 +2128,7 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
                     let mut max_child = None;
                     let mut max_child_ret = 0u64;
                     for &child in dom_children {
-                        let child_ret = retained_sizes.get(&child).copied().unwrap_or(0);
+                        let child_ret = retained_sizes[child.index()];
                         if child_ret > max_child_ret {
                             max_child_ret = child_ret;
                             max_child = Some(child);
@@ -2125,9 +2148,7 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
 
             // Describe the accumulation point
             let accum_info = if accum_node != *node_idx {
-                let (_, _, ref accum_cn) = node_data_map.get(&accum_node)
-                    .map(|&(id, nt, ref cn)| (id, nt, cn.to_string()))
-                    .unwrap_or((0, "Unknown", String::new()));
+                let (_, _, ref accum_cn) = node_data_map[accum_node.index()];
                 format!(". Memory accumulated in {} ({:.2} MB)",
                     accum_cn, accum_retained as f64 / (1024.0 * 1024.0))
             } else {
@@ -2159,14 +2180,12 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
             if classloader_suspect_nodes.contains(&node_idx) {
                 continue;
             }
-            let node_type = match node_data_map.get(&node_idx) {
-                Some(&(_, nt, _)) => nt,
-                None => continue,
-            };
+            let ni = node_idx.index();
+            let (_, node_type, _) = node_data_map[ni];
             if node_type != "Instance" && node_type != "Array" {
                 continue;
             }
-            let retained = retained_sizes.get(&node_idx).copied().unwrap_or(0);
+            let retained = retained_sizes[ni];
             if retained < threshold_bytes {
                 continue;
             }
@@ -2203,7 +2222,7 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
             if let Some(dom_children) = children_map.get(&node_idx) {
                 for &child in dom_children {
                     if other_set.contains(&child) {
-                        let child_retained = retained_sizes.get(&child).copied().unwrap_or(0);
+                        let child_retained = retained_sizes[child.index()];
                         if child_retained > retained * 9 / 10 {
                             skip_set.insert(node_idx);
                             break;
@@ -2220,10 +2239,8 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
             if leak_suspects.len() >= 10 {
                 break;
             }
-            let (object_id, class_name) = match node_data_map.get(&node_idx) {
-                Some(&(id, _, ref cn)) => (id, cn.to_string()),
-                None => continue,
-            };
+            let (object_id, _, ref cn) = node_data_map[node_idx.index()];
+            let class_name = cn.to_string();
             let display_name = if class_name.is_empty() { "Unknown".to_string() } else { class_name };
             leak_suspects.push(LeakSuspect {
                 class_name: display_name.clone(),
@@ -2431,9 +2448,14 @@ mod tests {
         let mut reverse_refs: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
         let mut children_map: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
         let mut id_to_node: HashMap<u64, NodeIndex> = HashMap::new();
-        let mut node_data_map: HashMap<NodeIndex, (u64, &'static str, Arc<str>)> = HashMap::new();
-        let mut shallow_sizes: HashMap<NodeIndex, u64> = HashMap::new();
-        let mut retained_sizes: HashMap<NodeIndex, u64> = HashMap::new();
+
+        // Determine the max node index to size the Vecs
+        let max_idx = node_data.iter().map(|&(idx, _, _, _)| idx.index()).max().unwrap_or(0);
+        let vec_size = max_idx + 1;
+        let empty_class: Arc<str> = Arc::from("");
+        let mut node_data_map: Vec<(u64, &'static str, Arc<str>)> = vec![(0, "Unknown", empty_class.clone()); vec_size];
+        let mut shallow_sizes: Vec<u64> = vec![0u64; vec_size];
+        let mut retained_sizes: Vec<u64> = vec![0u64; vec_size];
 
         for &(src, tgt) in edges {
             reverse_refs.entry(tgt).or_insert_with(Vec::new).push(src);
@@ -2441,12 +2463,12 @@ mod tests {
         }
 
         for &(idx, object_id, node_type, class_name) in node_data {
-            node_data_map.insert(idx, (object_id, node_type, Arc::from(class_name)));
+            node_data_map[idx.index()] = (object_id, node_type, Arc::from(class_name));
             if object_id > 0 {
                 id_to_node.insert(object_id, idx);
             }
-            shallow_sizes.insert(idx, 100);
-            retained_sizes.insert(idx, 200);
+            shallow_sizes[idx.index()] = 100;
+            retained_sizes[idx.index()] = 200;
         }
 
         AnalysisState {

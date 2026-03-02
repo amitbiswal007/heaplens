@@ -19,7 +19,7 @@ export function getWebviewContent(_webview: vscode.Webview): string {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https://d3js.org; style-src 'unsafe-inline';">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://d3js.org; style-src 'unsafe-inline';">
     <title>HeapLens</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -792,6 +792,9 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         }
 
         // ---- Tab 2: Histogram ----
+        const HISTOGRAM_PAGE_SIZE = 200;
+        let histogramShowAll = false;
+
         function renderHistogram(histogram) {
             const container = document.getElementById('histogram-table');
             let sorted = [...histogram];
@@ -807,6 +810,9 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                 sorted = sorted.filter(e => e.class_name.toLowerCase().includes(f));
             }
 
+            const totalCount = sorted.length;
+            const displayRows = histogramShowAll ? sorted : sorted.slice(0, HISTOGRAM_PAGE_SIZE);
+
             const cols = [
                 { key: 'class_name', label: 'Class Name', cls: '' },
                 { key: 'instance_count', label: 'Instances', cls: 'right' },
@@ -821,11 +827,25 @@ export function getWebviewContent(_webview: vscode.Webview): string {
             });
             html += '</tr></thead><tbody>';
 
-            sorted.forEach(e => {
+            displayRows.forEach(e => {
                 html += '<tr><td>' + escapeHtml(e.class_name) + '</td><td class="right">' + fmtNum(e.instance_count) + '</td><td class="right">' + fmt(e.shallow_size) + '</td><td class="right">' + fmt(e.retained_size) + '</td></tr>';
             });
             html += '</tbody></table>';
+
+            if (!histogramShowAll && totalCount > HISTOGRAM_PAGE_SIZE) {
+                html += '<div style="text-align:center;padding:12px;"><button id="show-all-histogram" style="padding:6px 16px;cursor:pointer;background:var(--vscode-button-background);color:var(--vscode-button-foreground);border:none;border-radius:3px;">Show all ' + totalCount.toLocaleString() + ' classes</button></div>';
+            }
+
             container.innerHTML = html;
+
+            // "Show all" button handler
+            const showAllBtn = document.getElementById('show-all-histogram');
+            if (showAllBtn) {
+                showAllBtn.addEventListener('click', () => {
+                    histogramShowAll = true;
+                    renderHistogram(histogram);
+                });
+            }
 
             // Sort click handlers
             container.querySelectorAll('th[data-sort]').forEach(th => {
@@ -833,6 +853,7 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     const col = th.dataset.sort;
                     if (histogramSortCol === col) histogramSortAsc = !histogramSortAsc;
                     else { histogramSortCol = col; histogramSortAsc = false; }
+                    histogramShowAll = false; // reset pagination on re-sort
                     renderHistogram(histogram);
                 });
             });

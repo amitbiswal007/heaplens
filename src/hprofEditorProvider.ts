@@ -8,6 +8,16 @@ import { HEAP_ANALYSIS_SYSTEM_PROMPT, buildAnalyzePrompt } from './promptTemplat
 import { resolveSource } from './sourceResolver';
 import type { DependencyInfo } from './dependencyResolver';
 
+/** Per-editor state, keyed by hprof file path. */
+interface EditorState {
+    webviewPanel: vscode.WebviewPanel;
+    analysisData: AnalysisData | null;
+    chatHistory: ChatMessage[];
+    pendingWebviewMessage: any;
+    webviewReady: boolean;
+    dependencyInfoCache: Map<string, { tier: string; dependency?: DependencyInfo }>;
+}
+
 /**
  * Custom readonly editor provider for .hprof files.
  *
@@ -17,15 +27,14 @@ import type { DependencyInfo } from './dependencyResolver';
 export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider {
     public static readonly viewType = 'heaplens.hprofEditor';
 
+    private static readonly MAX_CHAT_HISTORY = 40; // 20 user + 20 assistant messages
+
     private rustClient: RustClient | null = null;
     private outputChannel: vscode.OutputChannel;
-    private lastAnalysisData: AnalysisData | null = null;
-    private activeWebviewPanel: vscode.WebviewPanel | null = null;
-    private currentHprofPath: string | null = null;
-    private chatHistory: ChatMessage[] = [];
-    private pendingWebviewMessage: any = null;
-    private webviewReady = false;
-    private dependencyInfoCache = new Map<string, { tier: string; dependency?: DependencyInfo }>();
+    /** Per-editor state keyed by hprof file path. */
+    private editors = new Map<string, EditorState>();
+    /** Tracks the most recently focused editor's hprof path. */
+    private activeHprofPath: string | null = null;
 
     constructor(
         private readonly context: vscode.ExtensionContext,
@@ -52,10 +61,19 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         };
 
         const hprofPath = document.uri.fsPath;
-        this.activeWebviewPanel = webviewPanel;
-        this.currentHprofPath = hprofPath;
-        this.webviewReady = false;
-        this.pendingWebviewMessage = null;
+        this.activeHprofPath = hprofPath;
+
+        // Create per-editor state
+        const editorState: EditorState = {
+            webviewPanel,
+            analysisData: null,
+            chatHistory: [],
+            pendingWebviewMessage: null,
+            webviewReady: false,
+            dependencyInfoCache: new Map()
+        };
+        this.editors.set(hprofPath, editorState);
+
         this.outputChannel.show(true);
         this.outputChannel.appendLine(`[HeapLens] Opening HPROF file: ${hprofPath}`);
         this.outputChannel.appendLine(`[HeapLens] File exists: ${fs.existsSync(hprofPath)}`);
@@ -74,9 +92,20 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         }
         this.outputChannel.appendLine('[HeapLens] Rust client created successfully');
 
+        // Clean up when the editor tab is closed
+        webviewPanel.onDidDispose(() => {
+            this.outputChannel.appendLine(`[HeapLens] Editor disposed for: ${hprofPath}`);
+            this.editors.delete(hprofPath);
+            if (this.activeHprofPath === hprofPath) {
+                this.activeHprofPath = null;
+            }
+        });
+
         // Wire webview <-> RustClient message passing
         webviewPanel.webview.onDidReceiveMessage(async (message) => {
             this.outputChannel.appendLine(`[HeapLens] Webview message: ${message.command}`);
+            const state = this.editors.get(hprofPath);
+            if (!state) { return; } // editor was disposed
             switch (message.command) {
                 case 'getChildren':
                     this.outputChannel.appendLine(`[HeapLens] getChildren request for objectId: ${message.objectId}`);
@@ -113,13 +142,13 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                     }
                     break;
                 case 'chatMessage':
-                    this.handleChatMessage(message.text, webviewPanel);
+                    this.handleChatMessage(message.text, hprofPath, webviewPanel);
                     break;
                 case 'goToSource':
-                    await this.handleGoToSource(message.className, webviewPanel);
+                    await this.handleGoToSource(message.className, hprofPath, webviewPanel);
                     break;
                 case 'queryDependencyInfo': {
-                    const cached = this.dependencyInfoCache.get(message.className);
+                    const cached = state.dependencyInfoCache.get(message.className);
                     if (cached) {
                         webviewPanel.webview.postMessage({
                             command: 'dependencyResolved',
@@ -150,16 +179,15 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                     }
                     break;
                 case 'copyReport':
-                    this.handleCopyReport(webviewPanel);
+                    this.handleCopyReport(hprofPath, webviewPanel);
                     break;
                 case 'ready':
                     this.outputChannel.appendLine('[HeapLens] Webview ready');
-                    this.webviewReady = true;
-                    // Resend analysis data if it arrived before webview was ready
-                    if (this.pendingWebviewMessage) {
+                    state.webviewReady = true;
+                    if (state.pendingWebviewMessage) {
                         this.outputChannel.appendLine('[HeapLens] Resending buffered analysisComplete to webview');
-                        webviewPanel.webview.postMessage(this.pendingWebviewMessage);
-                        this.pendingWebviewMessage = null;
+                        webviewPanel.webview.postMessage(state.pendingWebviewMessage);
+                        state.pendingWebviewMessage = null;
                     }
                     break;
             }
@@ -203,10 +231,12 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         webviewPanel: vscode.WebviewPanel,
         client: RustClient
     ): Promise<void> {
-        let analysisComplete = false;
+        let resolveAnalysis: (() => void) | null = null;
+        const analysisPromise = new Promise<void>((resolve) => { resolveAnalysis = resolve; });
 
         client.onNotification('heap_analysis_complete', (params: any) => {
-            analysisComplete = true;
+            resolveAnalysis?.();
+            const state = this.editors.get(hprofPath);
             this.outputChannel.appendLine(`[HeapLens] Received heap_analysis_complete notification, status: ${params.status}`);
             if (params.status === 'completed') {
                 const topObjCount = (params.top_objects || []).length;
@@ -214,13 +244,14 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                 const suspectCount = (params.leak_suspects || []).length;
                 this.outputChannel.appendLine(`[HeapLens] Data: ${topObjCount} objects, ${histCount} histogram entries, ${suspectCount} leak suspects`);
 
-                // Store analysis data for LLM integrations
-                this.lastAnalysisData = {
+                // Store analysis data for LLM integrations (per-editor)
+                const analysisData: AnalysisData = {
                     summary: params.summary || null,
                     topObjects: params.top_objects || [],
                     leakSuspects: params.leak_suspects || [],
                     classHistogram: params.class_histogram || []
                 };
+                if (state) { state.analysisData = analysisData; }
 
                 const webviewMessage = {
                     command: 'analysisComplete',
@@ -231,11 +262,11 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                     leakSuspects: params.leak_suspects || []
                 };
 
-                if (this.webviewReady) {
+                if (state?.webviewReady) {
                     webviewPanel.webview.postMessage(webviewMessage);
                     this.outputChannel.appendLine('[HeapLens] Posted analysisComplete to webview');
-                } else {
-                    this.pendingWebviewMessage = webviewMessage;
+                } else if (state) {
+                    state.pendingWebviewMessage = webviewMessage;
                     this.outputChannel.appendLine('[HeapLens] Webview not ready yet, buffering analysisComplete');
                 }
             } else if (params.status === 'error') {
@@ -267,13 +298,16 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                         progress.report({ increment: 30, message: 'Building heap graph...' });
                         this.outputChannel.appendLine('[HeapLens] Status=processing, waiting for notification...');
 
-                        const timeout = 300000;
                         const startTime = Date.now();
-                        while (!analysisComplete && (Date.now() - startTime) < timeout) {
-                            await new Promise(resolve => setTimeout(resolve, 100));
-                        }
+                        const timeoutPromise = new Promise<'timeout'>((resolve) =>
+                            setTimeout(() => resolve('timeout'), 300000)
+                        );
+                        const result = await Promise.race([
+                            analysisPromise.then(() => 'done' as const),
+                            timeoutPromise
+                        ]);
 
-                        if (!analysisComplete) {
+                        if (result === 'timeout') {
                             throw new Error('Analysis timed out after 5 minutes');
                         }
                         this.outputChannel.appendLine(`[HeapLens] Analysis completed in ${Date.now() - startTime}ms`);
@@ -289,7 +323,10 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         );
     }
 
-    private handleChatMessage(text: string, webviewPanel: vscode.WebviewPanel): void {
+    private handleChatMessage(text: string, hprofPath: string, webviewPanel: vscode.WebviewPanel): void {
+        const state = this.editors.get(hprofPath);
+        if (!state) { return; }
+
         const config = vscode.workspace.getConfiguration('heaplens.llm');
         const llmConfig: LlmConfig = {
             provider: config.get<'anthropic' | 'openai'>('provider', 'anthropic'),
@@ -312,18 +349,23 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         ];
 
         // Add analysis context on first message or if no history
-        if (this.chatHistory.length === 0 && this.lastAnalysisData) {
-            const context = formatAnalysisContext(this.lastAnalysisData);
+        if (state.chatHistory.length === 0 && state.analysisData) {
+            const context = formatAnalysisContext(state.analysisData);
             const userPrompt = buildAnalyzePrompt(context, text);
             messages.push({ role: 'user', content: userPrompt });
         } else {
-            // Include prior conversation
-            messages.push(...this.chatHistory);
+            // Include prior conversation (capped to prevent unbounded growth)
+            messages.push(...state.chatHistory);
             messages.push({ role: 'user', content: text });
         }
 
         // Track user message
-        this.chatHistory.push({ role: 'user', content: text });
+        state.chatHistory.push({ role: 'user', content: text });
+
+        // Trim chat history if it exceeds the limit
+        if (state.chatHistory.length > HprofEditorProvider.MAX_CHAT_HISTORY) {
+            state.chatHistory = state.chatHistory.slice(-HprofEditorProvider.MAX_CHAT_HISTORY);
+        }
 
         let assistantResponse = '';
 
@@ -335,7 +377,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                 webviewPanel.webview.postMessage({ command: 'chatChunk', text: chunk });
             },
             () => {
-                this.chatHistory.push({ role: 'assistant', content: assistantResponse });
+                state.chatHistory.push({ role: 'assistant', content: assistantResponse });
                 webviewPanel.webview.postMessage({ command: 'chatDone' });
             },
             (error) => {
@@ -354,18 +396,19 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         return (bytes / Math.pow(k, idx)).toFixed(idx > 1 ? 2 : 0) + ' ' + sizes[idx];
     }
 
-    private handleCopyReport(webviewPanel: vscode.WebviewPanel): void {
-        if (!this.lastAnalysisData) {
+    private handleCopyReport(hprofPath: string, webviewPanel: vscode.WebviewPanel): void {
+        const state = this.editors.get(hprofPath);
+        if (!state?.analysisData) {
             vscode.window.showWarningMessage('No analysis data available for report.');
             return;
         }
 
-        const data = this.lastAnalysisData;
+        const data = state.analysisData;
         const lines: string[] = [];
 
         lines.push('# HeapLens Incident Report');
         lines.push('');
-        lines.push(`**File:** ${this.currentHprofPath || 'Unknown'}`);
+        lines.push(`**File:** ${hprofPath}`);
         lines.push(`**Generated:** ${new Date().toISOString()}`);
         lines.push('');
 
@@ -414,8 +457,9 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         });
     }
 
-    private async handleGoToSource(className: string, webviewPanel: vscode.WebviewPanel): Promise<void> {
+    private async handleGoToSource(className: string, hprofPath: string, webviewPanel: vscode.WebviewPanel): Promise<void> {
         this.outputChannel.appendLine(`[HeapLens] Go to source requested for: ${className}`);
+        const state = this.editors.get(hprofPath);
         try {
             const result = await resolveSource(className);
             if (result) {
@@ -427,7 +471,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                 if (result.dependency) {
                     info.dependency = result.dependency;
                 }
-                this.dependencyInfoCache.set(className, info);
+                state?.dependencyInfoCache.set(className, info);
 
                 webviewPanel.webview.postMessage({
                     command: 'dependencyResolved',
@@ -450,15 +494,16 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
     }
 
     public getAnalysisData(): AnalysisData | null {
-        if (!this.lastAnalysisData) {
+        const state = this.activeHprofPath ? this.editors.get(this.activeHprofPath) : undefined;
+        if (!state?.analysisData) {
             return null;
         }
 
         // Enrich leak suspects with cached dependency info
         const enriched: AnalysisData = {
-            ...this.lastAnalysisData,
-            leakSuspects: this.lastAnalysisData.leakSuspects.map(s => {
-                const cached = this.dependencyInfoCache.get(s.class_name);
+            ...state.analysisData,
+            leakSuspects: state.analysisData.leakSuspects.map(s => {
+                const cached = state.dependencyInfoCache.get(s.class_name);
                 if (cached?.dependency) {
                     return { ...s, dependency: cached.dependency };
                 }
@@ -469,11 +514,12 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
     }
 
     public getActiveWebviewPanel(): vscode.WebviewPanel | null {
-        return this.activeWebviewPanel;
+        const state = this.activeHprofPath ? this.editors.get(this.activeHprofPath) : undefined;
+        return state?.webviewPanel ?? null;
     }
 
     public getCurrentHprofPath(): string | null {
-        return this.currentHprofPath;
+        return this.activeHprofPath;
     }
 
     public dispose(): void {
@@ -481,5 +527,6 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
             this.rustClient.dispose();
             this.rustClient = null;
         }
+        this.editors.clear();
     }
 }

@@ -203,12 +203,13 @@ export class RustClient {
 
     /**
      * Sends a JSON-RPC request and returns a Promise that resolves when the response is received.
-     * 
+     *
      * @param method - The JSON-RPC method name
      * @param params - Optional parameters for the request
+     * @param timeoutMs - Request timeout in milliseconds (default: 30s, use 0 to disable)
      * @returns Promise that resolves with the response result
      */
-    public async sendRequest(method: string, params?: any): Promise<any> {
+    public async sendRequest(method: string, params?: any, timeoutMs = 30000): Promise<any> {
         if (this.isShutdown) {
             throw new Error('Client is shutdown');
         }
@@ -222,19 +223,38 @@ export class RustClient {
         };
 
         return new Promise<any>((resolve, reject) => {
-            this.pendingRequests.set(id, { resolve, reject });
+            let timer: ReturnType<typeof setTimeout> | undefined;
+
+            const cleanup = () => {
+                if (timer) { clearTimeout(timer); }
+                this.pendingRequests.delete(id);
+            };
+
+            this.pendingRequests.set(id, {
+                resolve: (value: any) => { cleanup(); resolve(value); },
+                reject: (err: Error) => { cleanup(); reject(err); }
+            });
+
+            if (timeoutMs > 0) {
+                timer = setTimeout(() => {
+                    if (this.pendingRequests.has(id)) {
+                        this.pendingRequests.delete(id);
+                        reject(new Error(`Request '${method}' timed out after ${timeoutMs}ms`));
+                    }
+                }, timeoutMs);
+            }
 
             const requestLine = JSON.stringify(request) + '\n';
 
             if (!this.process.stdin || this.process.stdin.destroyed) {
-                this.pendingRequests.delete(id);
+                cleanup();
                 reject(new Error('Process stdin is not available'));
                 return;
             }
 
             this.process.stdin.write(requestLine, (error) => {
                 if (error) {
-                    this.pendingRequests.delete(id);
+                    cleanup();
                     reject(error);
                 }
             });

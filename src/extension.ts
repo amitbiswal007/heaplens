@@ -23,8 +23,7 @@ function getHprofServerPath(): string {
         platform === 'win32' ? 'hprof-server.exe' : 'hprof-server');
 
     if (fs.existsSync(prodPath)) { return prodPath; }
-    if (fs.existsSync(devPath)) { return devPath; }
-    return prodPath;
+    return devPath; // fallback to dev path (will show a helpful error if missing)
 }
 
 export function activate(context: vscode.ExtensionContext) {
