@@ -3,13 +3,14 @@ import * as vscode from 'vscode';
 /**
  * Returns the HTML content for the HeapLens tabbed webview.
  *
- * Six tabs:
+ * Seven tabs:
  * 1. Overview — summary stats + top 10 objects table + pie chart
  * 2. Histogram — sortable class histogram table with search
  * 3. Dominator Tree — expandable tree with lazy drill-down + optional sunburst
  * 4. Leak Suspects — card layout with severity indicators
- * 5. Source — browsable resolvable classes with source resolution status
- * 6. AI Chat — LLM-powered heap analysis Q&A
+ * 5. Waste — duplicate strings and empty collections analysis
+ * 6. Source — browsable resolvable classes with source resolution status
+ * 7. AI Chat — LLM-powered heap analysis Q&A
  */
 export function getWebviewContent(_webview: vscode.Webview): string {
     const d3Uri = 'https://d3js.org/d3.v7.min.js';
@@ -496,6 +497,49 @@ export function getWebviewContent(_webview: vscode.Webview): string {
             opacity: 0.6;
             margin-bottom: 12px;
         }
+
+        /* Waste tab */
+        .waste-summary-bar {
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+            margin-bottom: 20px;
+        }
+        .waste-stat-card {
+            padding: 12px 20px;
+            background: var(--vscode-editorWidget-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 4px;
+            min-width: 160px;
+        }
+        .waste-stat-card .label {
+            font-size: 11px;
+            text-transform: uppercase;
+            opacity: 0.7;
+            margin-bottom: 4px;
+        }
+        .waste-stat-card .value {
+            font-size: 20px;
+            font-weight: bold;
+        }
+        .waste-stat-card .value.highlight {
+            color: var(--vscode-editorWarning-foreground);
+        }
+        .waste-section-title {
+            font-size: 14px;
+            font-weight: bold;
+            margin: 20px 0 10px 0;
+            opacity: 0.9;
+        }
+        .waste-preview {
+            max-width: 400px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-family: var(--vscode-editor-font-family, monospace);
+            font-size: 12px;
+            opacity: 0.85;
+        }
     </style>
 </head>
 <body>
@@ -504,6 +548,7 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         <button class="tab-btn" data-tab="histogram">Histogram</button>
         <button class="tab-btn" data-tab="domtree">Dominator Tree</button>
         <button class="tab-btn" data-tab="leaks">Leak Suspects</button>
+        <button class="tab-btn" data-tab="waste">Waste</button>
         <button class="tab-btn" data-tab="source">Source</button>
         <button class="tab-btn" data-tab="chat">AI Chat</button>
     </div>
@@ -553,14 +598,25 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         <div id="leak-suspects"><div class="loading">Waiting for analysis...</div></div>
     </div>
 
-    <!-- Tab 5: Source -->
+    <!-- Tab 5: Waste -->
+    <div id="tab-waste" class="tab-content">
+        <div class="waste-summary-bar" id="waste-summary-bar">
+            <div class="loading">Waiting for analysis...</div>
+        </div>
+        <div class="waste-section-title" id="waste-dup-title" style="display:none;">Duplicate Strings</div>
+        <div id="waste-dup-table"></div>
+        <div class="waste-section-title" id="waste-empty-title" style="display:none;">Empty Collections</div>
+        <div id="waste-empty-table"></div>
+    </div>
+
+    <!-- Tab 6: Source -->
     <div id="tab-source" class="tab-content">
         <input type="text" class="search-box" id="source-search" placeholder="Filter by class name...">
         <div class="source-stats" id="source-stats"></div>
         <div id="source-table"><div class="loading">Waiting for analysis...</div></div>
     </div>
 
-    <!-- Tab 6: AI Chat -->
+    <!-- Tab 7: AI Chat -->
     <div id="tab-chat" class="tab-content">
         <div class="chat-container">
             <div class="chat-messages" id="chat-messages">
@@ -617,6 +673,7 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     renderHistogram(msg.classHistogram || []);
                     renderDominatorTree(msg.topLayers || []);
                     renderLeakSuspects(msg.leakSuspects || []);
+                    renderWaste(msg.wasteAnalysis);
                     renderSourceTab(msg.classHistogram || []);
                     break;
                 case 'childrenResponse':
@@ -1204,6 +1261,68 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                 addChatBubble('error', msg.message || 'An error occurred');
             }
         });
+
+        // ---- Tab 5: Waste ----
+        function renderWaste(wasteAnalysis) {
+            const summaryBar = document.getElementById('waste-summary-bar');
+            const dupTitle = document.getElementById('waste-dup-title');
+            const dupTable = document.getElementById('waste-dup-table');
+            const emptyTitle = document.getElementById('waste-empty-title');
+            const emptyTable = document.getElementById('waste-empty-table');
+
+            if (!wasteAnalysis) {
+                summaryBar.innerHTML = '<div class="loading">No waste analysis data available</div>';
+                return;
+            }
+
+            const w = wasteAnalysis;
+
+            // Summary cards
+            summaryBar.innerHTML = [
+                { label: 'Total Waste', value: fmt(w.total_wasted_bytes), highlight: w.waste_percentage > 5 },
+                { label: '% of Heap', value: w.waste_percentage.toFixed(1) + '%', highlight: w.waste_percentage > 10 },
+                { label: 'Dup Strings', value: fmt(w.duplicate_string_wasted_bytes), highlight: false },
+                { label: 'Empty Collections', value: fmt(w.empty_collection_wasted_bytes), highlight: false }
+            ].map(function(c) {
+                return '<div class="waste-stat-card"><div class="label">' + c.label + '</div><div class="value' + (c.highlight ? ' highlight' : '') + '">' + c.value + '</div></div>';
+            }).join('');
+
+            // Duplicate strings table
+            var dups = w.duplicate_strings || [];
+            if (dups.length > 0) {
+                dupTitle.style.display = 'block';
+                var html = '<table><thead><tr><th>Preview</th><th class="right">Copies</th><th class="right">Wasted</th><th class="right">Total</th></tr></thead><tbody>';
+                dups.forEach(function(d) {
+                    var preview = d.preview || '(empty)';
+                    html += '<tr><td><span class="waste-preview" title="' + escapeHtml(preview) + '">' + escapeHtml(preview) + '</span></td>'
+                        + '<td class="right">' + fmtNum(d.count) + '</td>'
+                        + '<td class="right">' + fmt(d.wasted_bytes) + '</td>'
+                        + '<td class="right">' + fmt(d.total_bytes) + '</td></tr>';
+                });
+                html += '</tbody></table>';
+                dupTable.innerHTML = html;
+            } else {
+                dupTitle.style.display = 'none';
+                dupTable.innerHTML = '';
+            }
+
+            // Empty collections table
+            var empties = w.empty_collections || [];
+            if (empties.length > 0) {
+                emptyTitle.style.display = 'block';
+                var ehtml = '<table><thead><tr><th>Class</th><th class="right">Count</th><th class="right">Wasted</th></tr></thead><tbody>';
+                empties.forEach(function(e) {
+                    ehtml += '<tr><td>' + escapeHtml(e.class_name) + '</td>'
+                        + '<td class="right">' + fmtNum(e.count) + '</td>'
+                        + '<td class="right">' + fmt(e.wasted_bytes) + '</td></tr>';
+                });
+                ehtml += '</tbody></table>';
+                emptyTable.innerHTML = ehtml;
+            } else {
+                emptyTitle.style.display = 'none';
+                emptyTable.innerHTML = '';
+            }
+        }
 
         // ---- Tab 4: Leak Suspects ----
         function renderLeakSuspects(suspects) {

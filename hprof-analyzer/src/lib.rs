@@ -11,6 +11,8 @@ use memmap2::{Mmap, MmapOptions};
 use petgraph::{Graph, Directed, graph::NodeIndex};
 use petgraph::algo::dominators;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -655,7 +657,7 @@ pub struct HeapGraphParts {
 /// # Ok(())
 /// # }
 /// ```
-pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
+pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
     log::debug!("Starting graph construction ({} bytes)", data.len());
 
     let hprof = parse_hprof(data)
@@ -1067,10 +1069,30 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
     );
 
     // ============================================================================
-    // PASS 2: Add edges (references) between nodes
+    // PASS 2: Add edges (references) between nodes + collect waste data
     // ============================================================================
 
-    log::debug!("Pass 2: Adding edges (references)...");
+    log::debug!("Pass 2: Adding edges (references) and collecting waste data...");
+
+    // --- Waste analysis: look up class IDs for target classes ---
+    let string_class_id: Option<u64> = class_name_map.iter()
+        .find(|(_, name)| name.as_str() == "java.lang.String")
+        .map(|(id, _)| *id);
+    let hashmap_class_id: Option<u64> = class_name_map.iter()
+        .find(|(_, name)| name.as_str() == "java.util.HashMap")
+        .map(|(id, _)| *id);
+    let linked_hashmap_class_id: Option<u64> = class_name_map.iter()
+        .find(|(_, name)| name.as_str() == "java.util.LinkedHashMap")
+        .map(|(id, _)| *id);
+    let arraylist_class_id: Option<u64> = class_name_map.iter()
+        .find(|(_, name)| name.as_str() == "java.util.ArrayList")
+        .map(|(id, _)| *id);
+
+    let mut waste_data = WasteRawData {
+        string_instances: Vec::new(),
+        backing_arrays: HashMap::new(),
+        empty_collections: Vec::new(),
+    };
 
     let mut edge_count = 0;
     // Use HashSet for O(1) edge deduplication instead of graph.contains_edge() which is O(E)
@@ -1125,6 +1147,45 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
                                             }
                                         }
                                     });
+
+                                    // --- Waste: collect String value references ---
+                                    if string_class_id == Some(class_obj_id) {
+                                        if let Some(value_array_id) = extract_nth_field_of_type(
+                                            fields, id_size, field_types,
+                                            jvm_hprof::heap_dump::FieldType::ObjectId, 0,
+                                        ) {
+                                            if value_array_id != 0 {
+                                                let shallow = class_instance_sizes.get(&class_obj_id)
+                                                    .copied().unwrap_or(fields.len() as u32);
+                                                waste_data.string_instances.push(StringInstanceInfo {
+                                                    value_array_id,
+                                                    shallow_size: shallow,
+                                                });
+                                            }
+                                        }
+                                    }
+
+                                    // --- Waste: collect empty collections ---
+                                    let is_collection = hashmap_class_id == Some(class_obj_id)
+                                        || linked_hashmap_class_id == Some(class_obj_id)
+                                        || arraylist_class_id == Some(class_obj_id);
+                                    if is_collection {
+                                        if let Some(size_val) = extract_nth_field_of_type(
+                                            fields, id_size, field_types,
+                                            jvm_hprof::heap_dump::FieldType::Int, 0,
+                                        ) {
+                                            if size_val == 0 {
+                                                let cname = class_name_map.get(&class_obj_id)
+                                                    .cloned().unwrap_or_default();
+                                                let shallow = class_instance_sizes.get(&class_obj_id)
+                                                    .copied().unwrap_or(fields.len() as u32);
+                                                waste_data.empty_collections.push(EmptyCollectionInfo {
+                                                    class_name: cname,
+                                                    shallow_size: shallow,
+                                                });
+                                            }
+                                        }
+                                    }
                                 } else {
                                     fallback_instance_count += 1;
                                     extract_object_references_fallback(fields, id_size, |ref_id| {
@@ -1206,6 +1267,67 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
                                 }
                             }
                         }
+                        // Waste: collect backing arrays for string dedup
+                        jvm_hprof::heap_dump::SubRecord::PrimitiveArray(array) => {
+                            let arr_id = array.obj_id().id();
+                            let prim_type = array.primitive_type();
+                            match prim_type {
+                                jvm_hprof::heap_dump::PrimitiveArrayType::Byte => {
+                                    if let Some(iter) = array.bytes() {
+                                        // bytes() yields Result<i8, _>; collect as u8
+                                        let bytes: Vec<u8> = iter
+                                            .filter_map(|r| r.ok())
+                                            .map(|b| b as u8)
+                                            .collect();
+                                        let arr_size = bytes.len() as u32;
+                                        let content_hash = hash_bytes(&bytes);
+                                        let preview = if bytes.len() <= 10240 {
+                                            let s = String::from_utf8_lossy(&bytes);
+                                            let mut p = s.chars().take(120).collect::<String>();
+                                            if s.chars().count() > 120 { p.push_str("..."); }
+                                            p
+                                        } else {
+                                            String::new()
+                                        };
+                                        waste_data.backing_arrays.insert(arr_id, BackingArrayInfo {
+                                            content_hash,
+                                            size: arr_size,
+                                            preview,
+                                        });
+                                    }
+                                }
+                                jvm_hprof::heap_dump::PrimitiveArrayType::Char => {
+                                    if let Some(iter) = array.chars() {
+                                        // chars() yields Result<u16, _>
+                                        let chars: Vec<u16> = iter
+                                            .filter_map(|r| r.ok())
+                                            .collect();
+                                        let arr_size = (chars.len() * 2) as u32;
+                                        // Hash raw bytes for consistent dedup
+                                        let raw_bytes: Vec<u8> = chars.iter()
+                                            .flat_map(|c| c.to_be_bytes())
+                                            .collect();
+                                        let content_hash = hash_bytes(&raw_bytes);
+                                        let preview = if chars.len() <= 5120 {
+                                            let s: String = chars.iter()
+                                                .map(|&c| std::char::from_u32(c as u32).unwrap_or('\u{FFFD}'))
+                                                .collect();
+                                            let mut p = s.chars().take(120).collect::<String>();
+                                            if s.chars().count() > 120 { p.push_str("..."); }
+                                            p
+                                        } else {
+                                            String::new()
+                                        };
+                                        waste_data.backing_arrays.insert(arr_id, BackingArrayInfo {
+                                            content_hash,
+                                            size: arr_size,
+                                            preview,
+                                        });
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1215,19 +1337,21 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
     drop(added_edges); // Free edge dedup set before dominator analysis
 
     log::info!("Pass 2 complete: added {} edges (typed: {} instances, fallback: {} instances)", edge_count, typed_instance_count, fallback_instance_count);
+    log::info!("Waste data collected: {} string instances, {} backing arrays, {} empty collections",
+        waste_data.string_instances.len(), waste_data.backing_arrays.len(), waste_data.empty_collections.len());
     log::info!(
         "Graph construction complete: {} nodes, {} edges",
         graph.node_count(),
         graph.edge_count()
     );
 
-    Ok(HeapGraph {
+    Ok((HeapGraph {
         graph,
         id_to_node,
         super_root,
         summary,
         classloader_ids,
-    })
+    }, waste_data))
 }
 
 /// Converts a JVM internal class name to Java format.
@@ -1347,6 +1471,176 @@ where
         if id != 0 {
             callback(id);
         }
+    }
+}
+
+// ============================================================================
+// Waste analysis helpers
+// ============================================================================
+
+/// Info about a java.lang.String instance collected during Pass 2.
+struct StringInstanceInfo {
+    value_array_id: u64,
+    shallow_size: u32,
+}
+
+/// Info about a backing array (byte[] or char[]) for string dedup.
+struct BackingArrayInfo {
+    content_hash: u64,
+    size: u32,
+    preview: String,
+}
+
+/// Info about an empty collection instance.
+struct EmptyCollectionInfo {
+    class_name: String,
+    shallow_size: u32,
+}
+
+/// Raw waste data collected during graph building.
+pub struct WasteRawData {
+    string_instances: Vec<StringInstanceInfo>,
+    backing_arrays: HashMap<u64, BackingArrayInfo>,
+    empty_collections: Vec<EmptyCollectionInfo>,
+}
+
+/// Hashes a byte slice using SipHash (stdlib DefaultHasher).
+fn hash_bytes(data: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    data.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Extracts the value of the Nth field matching a target type from instance field data.
+///
+/// Walks through the field layout and returns the raw bytes as u64 for the Nth
+/// field of the specified type. Returns None if not enough fields of that type exist.
+fn extract_nth_field_of_type(
+    data: &[u8],
+    id_size: IdSize,
+    field_types: &[jvm_hprof::heap_dump::FieldType],
+    target_type: jvm_hprof::heap_dump::FieldType,
+    n: usize,
+) -> Option<u64> {
+    use jvm_hprof::heap_dump::FieldType;
+    let mut offset = 0;
+    let mut match_count = 0;
+
+    let matches_target = |ft: &FieldType| -> bool {
+        matches!(
+            (&target_type, ft),
+            (FieldType::ObjectId, FieldType::ObjectId)
+            | (FieldType::Boolean, FieldType::Boolean)
+            | (FieldType::Byte, FieldType::Byte)
+            | (FieldType::Char, FieldType::Char)
+            | (FieldType::Short, FieldType::Short)
+            | (FieldType::Int, FieldType::Int)
+            | (FieldType::Float, FieldType::Float)
+            | (FieldType::Long, FieldType::Long)
+            | (FieldType::Double, FieldType::Double)
+        )
+    };
+
+    for ft in field_types {
+        let size = field_type_size(ft, id_size);
+        if offset + size > data.len() {
+            break;
+        }
+        if matches_target(ft) {
+            if match_count == n {
+                let value = match size {
+                    1 => data[offset] as u64,
+                    2 => u16::from_be_bytes([data[offset], data[offset + 1]]) as u64,
+                    4 => u32::from_be_bytes([
+                        data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+                    ]) as u64,
+                    8 => u64::from_be_bytes([
+                        data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+                        data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
+                    ]),
+                    _ => return None,
+                };
+                return Some(value);
+            }
+            match_count += 1;
+        }
+        offset += size;
+    }
+    None
+}
+
+/// Computes waste analysis from raw data collected during graph building.
+fn compute_waste_analysis(
+    waste_data: &WasteRawData,
+    total_heap_size: u64,
+) -> WasteAnalysis {
+    // --- Duplicate strings ---
+    // For each StringInstanceInfo, look up its backing array and group by content hash.
+    // HashMap<content_hash, (count, per_copy_size, preview)>
+    let mut string_groups: HashMap<u64, (u64, u64, String)> = HashMap::new();
+    for si in &waste_data.string_instances {
+        if let Some(array_info) = waste_data.backing_arrays.get(&si.value_array_id) {
+            let per_copy_size = si.shallow_size as u64 + array_info.size as u64;
+            let entry = string_groups.entry(array_info.content_hash)
+                .or_insert((0, per_copy_size, array_info.preview.clone()));
+            entry.0 += 1;
+        }
+    }
+
+    let mut dup_groups: Vec<DuplicateStringGroup> = string_groups
+        .into_values()
+        .filter(|(count, _, _)| *count > 1)
+        .map(|(count, per_copy_size, preview)| {
+            let wasted = (count - 1) * per_copy_size;
+            let total = count * per_copy_size;
+            DuplicateStringGroup { preview, count, wasted_bytes: wasted, total_bytes: total }
+        })
+        .collect();
+    dup_groups.sort_by(|a, b| b.wasted_bytes.cmp(&a.wasted_bytes));
+    dup_groups.truncate(50);
+
+    let duplicate_string_wasted_bytes: u64 = dup_groups.iter().map(|g| g.wasted_bytes).sum();
+
+    // --- Empty collections ---
+    let mut collection_groups: HashMap<String, (u64, u64)> = HashMap::new(); // (count, total_shallow)
+    for ec in &waste_data.empty_collections {
+        let entry = collection_groups.entry(ec.class_name.clone()).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += ec.shallow_size as u64;
+    }
+
+    let mut empty_cols: Vec<EmptyCollectionGroup> = collection_groups
+        .into_iter()
+        .map(|(class_name, (count, wasted_bytes))| {
+            EmptyCollectionGroup { class_name, count, wasted_bytes }
+        })
+        .collect();
+    empty_cols.sort_by(|a, b| b.wasted_bytes.cmp(&a.wasted_bytes));
+
+    let empty_collection_wasted_bytes: u64 = empty_cols.iter().map(|g| g.wasted_bytes).sum();
+
+    let total_wasted_bytes = duplicate_string_wasted_bytes + empty_collection_wasted_bytes;
+    let waste_percentage = if total_heap_size > 0 {
+        (total_wasted_bytes as f64 / total_heap_size as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    log::info!(
+        "Waste analysis: {:.2} MB wasted ({:.1}% of heap) — dup strings: {:.2} MB, empty collections: {:.2} MB",
+        total_wasted_bytes as f64 / (1024.0 * 1024.0),
+        waste_percentage,
+        duplicate_string_wasted_bytes as f64 / (1024.0 * 1024.0),
+        empty_collection_wasted_bytes as f64 / (1024.0 * 1024.0),
+    );
+
+    WasteAnalysis {
+        total_wasted_bytes,
+        waste_percentage,
+        duplicate_string_wasted_bytes,
+        empty_collection_wasted_bytes,
+        duplicate_strings: dup_groups,
+        empty_collections: empty_cols,
     }
 }
 
@@ -1606,6 +1900,47 @@ pub struct LeakSuspect {
     pub description: String,
 }
 
+/// A group of duplicate strings sharing the same content.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct DuplicateStringGroup {
+    /// First 120 chars of the string content.
+    pub preview: String,
+    /// Number of copies of this string.
+    pub count: u64,
+    /// Bytes wasted by duplicates: (count - 1) * per_copy_size.
+    pub wasted_bytes: u64,
+    /// Total bytes used by all copies.
+    pub total_bytes: u64,
+}
+
+/// A group of empty collection instances of the same class.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct EmptyCollectionGroup {
+    /// The collection class name (e.g. "java.util.HashMap").
+    pub class_name: String,
+    /// Number of empty instances.
+    pub count: u64,
+    /// Total shallow size of all empty instances.
+    pub wasted_bytes: u64,
+}
+
+/// Waste analysis results: duplicate strings and empty collections.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct WasteAnalysis {
+    /// Total bytes wasted by duplicates and empty collections.
+    pub total_wasted_bytes: u64,
+    /// Waste as percentage of total heap.
+    pub waste_percentage: f64,
+    /// Bytes wasted by duplicate strings alone.
+    pub duplicate_string_wasted_bytes: u64,
+    /// Bytes wasted by empty collections alone.
+    pub empty_collection_wasted_bytes: u64,
+    /// Top 50 duplicate string groups by wasted bytes.
+    pub duplicate_strings: Vec<DuplicateStringGroup>,
+    /// Empty collection groups by class.
+    pub empty_collections: Vec<EmptyCollectionGroup>,
+}
+
 /// Summary statistics for the entire heap dump.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct HeapSummary {
@@ -1655,6 +1990,8 @@ pub struct AnalysisState {
     /// Reverse reference adjacency list: for each node, who references it in the original heap graph.
     /// Used for BFS backward traversal to find GC root paths.
     pub reverse_refs: HashMap<NodeIndex, Vec<NodeIndex>>,
+    /// Waste analysis: duplicate strings and empty collections.
+    pub waste_analysis: WasteAnalysis,
 }
 
 impl AnalysisState {
@@ -1886,7 +2223,7 @@ impl AnalysisState {
 ///
 /// This is similar to `calculate_dominators` but also returns the analysis state
 /// needed for lazy loading queries, plus class histogram and leak suspects.
-pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectReport>, AnalysisState)> {
+pub fn calculate_dominators_with_state(graph: HeapGraph, waste_data: WasteRawData) -> Result<(Vec<ObjectReport>, AnalysisState)> {
     log::debug!("Calculating dominators with state for {} nodes", graph.node_count());
 
     let HeapGraphParts { graph: petgraph, id_to_node, super_root, mut summary, classloader_ids } = graph.into_parts();
@@ -2284,6 +2621,9 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
     }
     log::info!("Detected {} leak suspects", leak_suspects.len());
 
+    // Step 8: Compute waste analysis
+    let waste_analysis = compute_waste_analysis(&waste_data, summary.total_heap_size);
+
     let state = AnalysisState {
         children_map,
         retained_sizes,
@@ -2295,6 +2635,7 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
         leak_suspects,
         summary,
         reverse_refs,
+        waste_analysis,
     };
 
     Ok((top_50, state))
@@ -2489,6 +2830,14 @@ mod tests {
                 total_gc_roots: 1,
             },
             reverse_refs,
+            waste_analysis: WasteAnalysis {
+                total_wasted_bytes: 0,
+                waste_percentage: 0.0,
+                duplicate_string_wasted_bytes: 0,
+                empty_collection_wasted_bytes: 0,
+                duplicate_strings: vec![],
+                empty_collections: vec![],
+            },
         }
     }
 

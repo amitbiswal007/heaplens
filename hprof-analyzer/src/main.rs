@@ -8,7 +8,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use hprof_analyzer::{build_graph, calculate_dominators_with_state, HprofLoader};
+use hprof_analyzer::{build_graph, calculate_dominators_with_state, HprofLoader, WasteAnalysis};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -63,6 +63,8 @@ struct AnalyzeHeapResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     leak_suspects: Option<Vec<hprof_analyzer::LeakSuspect>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    waste_analysis: Option<WasteAnalysis>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
 
@@ -105,6 +107,7 @@ fn analyze_heap_blocking(
                 summary: Some(analysis_state.summary.clone()),
                 class_histogram: Some(analysis_state.class_histogram.clone()),
                 leak_suspects: Some(analysis_state.leak_suspects.clone()),
+                waste_analysis: Some(analysis_state.waste_analysis.clone()),
                 error: None,
             }
         }
@@ -119,6 +122,7 @@ fn analyze_heap_blocking(
                 summary: None,
                 class_histogram: None,
                 leak_suspects: None,
+                waste_analysis: None,
                 error: Some(error_msg),
             }
         }
@@ -142,7 +146,7 @@ fn analyze_heap_internal(
 
     // Step 2: Build the heap graph
     eprintln!("[Progress] Step 2/3: Building heap graph (this may take a while for large files)...");
-    let graph = build_graph(&mmap[..])
+    let (graph, waste_data) = build_graph(&mmap[..])
         .context("Failed to build heap graph")?;
 
     eprintln!("[Progress] Heap graph built: {} nodes, {} edges",
@@ -154,7 +158,7 @@ fn analyze_heap_internal(
 
     // Step 3: Calculate dominators and retained sizes with state
     eprintln!("[Progress] Step 3/3: Calculating dominators and retained sizes...");
-    let (top_objects, analysis_state) = calculate_dominators_with_state(graph)
+    let (top_objects, analysis_state) = calculate_dominators_with_state(graph, waste_data)
         .context("Failed to calculate dominators")?;
 
     eprintln!("[Progress] Analysis complete: {} top objects", top_objects.len());

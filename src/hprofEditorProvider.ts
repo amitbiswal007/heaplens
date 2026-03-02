@@ -249,7 +249,8 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                     summary: params.summary || null,
                     topObjects: params.top_objects || [],
                     leakSuspects: params.leak_suspects || [],
-                    classHistogram: params.class_histogram || []
+                    classHistogram: params.class_histogram || [],
+                    wasteAnalysis: params.waste_analysis || undefined
                 };
                 if (state) { state.analysisData = analysisData; }
 
@@ -259,7 +260,8 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                     topLayers: params.top_layers || [],
                     summary: params.summary || null,
                     classHistogram: params.class_histogram || [],
-                    leakSuspects: params.leak_suspects || []
+                    leakSuspects: params.leak_suspects || [],
+                    wasteAnalysis: params.waste_analysis || null
                 };
 
                 if (state?.webviewReady) {

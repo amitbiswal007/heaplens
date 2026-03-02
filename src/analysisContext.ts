@@ -35,6 +35,23 @@ export interface AnalysisData {
         shallow_size: number;
         retained_size: number;
     }>;
+    wasteAnalysis?: {
+        total_wasted_bytes: number;
+        waste_percentage: number;
+        duplicate_string_wasted_bytes: number;
+        empty_collection_wasted_bytes: number;
+        duplicate_strings: Array<{
+            preview: string;
+            count: number;
+            wasted_bytes: number;
+            total_bytes: number;
+        }>;
+        empty_collections: Array<{
+            class_name: string;
+            count: number;
+            wasted_bytes: number;
+        }>;
+    };
 }
 
 function fmtBytes(bytes: number): string {
@@ -104,6 +121,24 @@ export function formatAnalysisContext(data: AnalysisData): string {
         for (let i = 0; i < histLimit; i++) {
             const e = data.classHistogram[i];
             parts.push(`| ${e.class_name} | ${e.instance_count.toLocaleString()} | ${fmtBytes(e.shallow_size)} | ${fmtBytes(e.retained_size)} |`);
+        }
+        parts.push('');
+    }
+
+    // Waste analysis (summary + top 5 dup strings for LLM)
+    if (data.wasteAnalysis) {
+        const w = data.wasteAnalysis;
+        parts.push('## Waste Analysis\n');
+        parts.push(`- Total Waste: ${fmtBytes(w.total_wasted_bytes)} (${w.waste_percentage.toFixed(1)}% of heap)`);
+        parts.push(`- Duplicate Strings: ${fmtBytes(w.duplicate_string_wasted_bytes)}`);
+        parts.push(`- Empty Collections: ${fmtBytes(w.empty_collection_wasted_bytes)}`);
+        if (w.duplicate_strings.length > 0) {
+            parts.push('');
+            parts.push('Top duplicate strings:');
+            for (const ds of w.duplicate_strings.slice(0, 5)) {
+                const preview = ds.preview.length > 60 ? ds.preview.substring(0, 60) + '...' : ds.preview;
+                parts.push(`- "${preview}" x${ds.count} (wastes ${fmtBytes(ds.wasted_bytes)})`);
+            }
         }
         parts.push('');
     }
