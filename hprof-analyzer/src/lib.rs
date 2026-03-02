@@ -647,84 +647,67 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
         .map_err(|e| anyhow::anyhow!("Failed to parse HPROF file: {:?}", e))?;
 
     let id_size = hprof.header().id_size();
-    let mut graph = Graph::<NodeData, (), Directed>::new();
-    let mut id_to_node: HashMap<u64, NodeIndex> = HashMap::new();
+    // Estimate node count from file size: ~100 bytes per object on average
+    let estimated_nodes = (data.len() / 100).max(1024);
+    let mut graph = Graph::<NodeData, (), Directed>::with_capacity(estimated_nodes, estimated_nodes * 2);
+    let mut id_to_node: HashMap<u64, NodeIndex> = HashMap::with_capacity(estimated_nodes);
 
     let super_root = graph.add_node(NodeData::SuperRoot);
 
     // ============================================================================
-    // PASS 0a: Build string table (STRING_IN_UTF8 records)
+    // PASS 0: Build string table, class name map, and class graph nodes
+    //         (single scan of all top-level records)
     // ============================================================================
-    log::debug!("Pass 0a: Building string table...");
+    log::debug!("Pass 0: Building string table, class name map, and class nodes...");
     let mut string_table: HashMap<u64, String> = HashMap::new();
+    // Collect raw LoadClass entries to resolve after string table is complete
+    let mut load_class_entries: Vec<(u64, u64)> = Vec::new(); // (class_obj_id, class_name_id)
 
     for record_result in hprof.records_iter() {
         let record = record_result
             .map_err(|e| anyhow::anyhow!("Failed to parse record: {:?}", e))?;
-        if record.tag() == RecordTag::Utf8 {
-            if let Some(utf8_result) = record.as_utf_8() {
-                let utf8 = utf8_result
-                    .map_err(|e| anyhow::anyhow!("Failed to parse UTF8 string: {:?}", e))?;
-                let string_id = utf8.name_id().id();
-                let text = String::from_utf8_lossy(utf8.text()).to_string();
-                string_table.insert(string_id, text);
-            }
-        }
-    }
-    log::info!("Built string table: {} entries", string_table.len());
-
-    // ============================================================================
-    // PASS 0b: Build class name map (LOAD_CLASS records)
-    // ============================================================================
-    log::debug!("Pass 0b: Building class name map...");
-    let mut class_name_map: HashMap<u64, String> = HashMap::new();
-
-    for record_result in hprof.records_iter() {
-        let record = record_result
-            .map_err(|e| anyhow::anyhow!("Failed to parse record: {:?}", e))?;
-        if record.tag() == RecordTag::LoadClass {
-            if let Some(load_class_result) = record.as_load_class() {
-                let load_class = load_class_result
-                    .map_err(|e| anyhow::anyhow!("Failed to parse LoadClass: {:?}", e))?;
-                let class_obj_id = load_class.class_obj_id().id();
-                let class_name_id = load_class.class_name_id().id();
-                if let Some(name) = string_table.get(&class_name_id) {
-                    // Convert JVM internal format to Java format: java/lang/String -> java.lang.String
-                    // Also handle array types: [B -> byte[], [Ljava/lang/Object; -> java.lang.Object[]
-                    let java_name = convert_jvm_class_name(name);
-                    class_name_map.insert(class_obj_id, java_name);
+        match record.tag() {
+            RecordTag::Utf8 => {
+                if let Some(utf8_result) = record.as_utf_8() {
+                    let utf8 = utf8_result
+                        .map_err(|e| anyhow::anyhow!("Failed to parse UTF8 string: {:?}", e))?;
+                    let string_id = utf8.name_id().id();
+                    let text = String::from_utf8_lossy(utf8.text()).to_string();
+                    string_table.insert(string_id, text);
                 }
             }
+            RecordTag::LoadClass => {
+                if let Some(load_class_result) = record.as_load_class() {
+                    let load_class = load_class_result
+                        .map_err(|e| anyhow::anyhow!("Failed to parse LoadClass: {:?}", e))?;
+                    load_class_entries.push((load_class.class_obj_id().id(), load_class.class_name_id().id()));
+                }
+            }
+            _ => {}
         }
     }
-    log::info!("Built class name map: {} entries", class_name_map.len());
+    log::info!("Built string table: {} entries, {} LoadClass entries", string_table.len(), load_class_entries.len());
+
+    // Resolve class names and create class graph nodes from collected LoadClass entries
+    let mut class_name_map: HashMap<u64, String> = HashMap::with_capacity(load_class_entries.len());
+    let mut class_count = 0u64;
+    for (class_obj_id, class_name_id) in &load_class_entries {
+        if let Some(name) = string_table.get(class_name_id) {
+            let java_name = convert_jvm_class_name(name);
+            class_name_map.insert(*class_obj_id, java_name);
+        }
+        if !id_to_node.contains_key(class_obj_id) {
+            let node_idx = graph.add_node(NodeData::Class);
+            id_to_node.insert(*class_obj_id, node_idx);
+            class_count += 1;
+        }
+    }
+    log::info!("Built class name map: {} entries, {} class nodes", class_name_map.len(), class_count);
 
     // ============================================================================
     // PASS 1: Identify all nodes and add them to the graph
     // ============================================================================
     log::debug!("Pass 1: Identifying nodes...");
-
-    let mut class_count = 0u64;
-
-    // Collect all class IDs from LOAD_CLASS records
-    for record_result in hprof.records_iter() {
-        let record = record_result
-            .map_err(|e| anyhow::anyhow!("Failed to parse record: {:?}", e))?;
-        if record.tag() == RecordTag::LoadClass {
-            if let Some(load_class_result) = record.as_load_class() {
-                let load_class = load_class_result
-                    .map_err(|e| anyhow::anyhow!("Failed to parse LoadClass: {:?}", e))?;
-                let class_obj_id = load_class.class_obj_id().id();
-                if !id_to_node.contains_key(&class_obj_id) {
-                    let node_idx = graph.add_node(NodeData::Class);
-                    id_to_node.insert(class_obj_id, node_idx);
-                    class_count += 1;
-                }
-            }
-        }
-    }
-
-    log::info!("Found {} classes", class_count);
 
     // Now scan heap dump segments for instances, arrays, and GC roots
     let mut instance_count = 0u64;
@@ -734,14 +717,15 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
     let mut total_shallow_size = 0u64;
 
     // Also build a map of class_obj_id -> instance_size from Class sub-records
-    let mut class_instance_sizes: HashMap<u64, u32> = HashMap::new();
+    let num_classes = load_class_entries.len();
+    let mut class_instance_sizes: HashMap<u64, u32> = HashMap::with_capacity(num_classes);
 
     // Collect field descriptors and superclass info for typed reference extraction
     struct ClassFieldInfo {
         super_class_id: Option<u64>,
         own_field_types: Vec<jvm_hprof::heap_dump::FieldType>,
     }
-    let mut class_field_info: HashMap<u64, ClassFieldInfo> = HashMap::new();
+    let mut class_field_info: HashMap<u64, ClassFieldInfo> = HashMap::with_capacity(num_classes);
     // Track all classloader object IDs (for classloader-aware leak detection)
     let mut classloader_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
@@ -789,26 +773,50 @@ pub fn build_graph(data: &[u8]) -> Result<HeapGraph> {
     log::info!("Collected field descriptors for {} classes, {} unique classloaders",
         class_field_info.len(), classloader_ids.len());
 
-    // Resolve inheritance chains: for each class, build the complete field layout
-    // (child class fields first, then parent class fields, up to java.lang.Object)
-    let mut class_field_layouts: HashMap<u64, Vec<jvm_hprof::heap_dump::FieldType>> = HashMap::new();
+    // Resolve inheritance chains with memoization: once a parent's layout is resolved,
+    // child classes reuse it instead of re-walking. This avoids O(N²) in deep hierarchies.
+    let mut class_field_layouts: HashMap<u64, Vec<jvm_hprof::heap_dump::FieldType>> = HashMap::with_capacity(class_field_info.len());
     let class_ids: Vec<u64> = class_field_info.keys().copied().collect();
     for class_id in class_ids {
-        let mut layout = Vec::new();
+        if class_field_layouts.contains_key(&class_id) {
+            continue; // already resolved (by a child that needed us)
+        }
+        // Walk up the chain to find the first already-resolved ancestor
+        let mut chain: Vec<u64> = Vec::new();
         let mut current_id = Some(class_id);
         let mut visited = std::collections::HashSet::new();
         while let Some(cid) = current_id {
             if !visited.insert(cid) {
                 break; // cycle protection
             }
-            if let Some(info) = class_field_info.get(&cid) {
-                layout.extend_from_slice(&info.own_field_types);
-                current_id = info.super_class_id.filter(|&id| id != 0);
-            } else {
-                break;
+            if class_field_layouts.contains_key(&cid) {
+                break; // parent already resolved — use its cached layout
             }
+            chain.push(cid);
+            current_id = class_field_info.get(&cid)
+                .and_then(|info| info.super_class_id)
+                .filter(|&id| id != 0);
         }
-        class_field_layouts.insert(class_id, layout);
+        // Build layouts from the deepest unresolved ancestor down to class_id
+        // Each class's layout = own fields + parent's resolved layout
+        for i in (0..chain.len()).rev() {
+            let cid = chain[i];
+            let parent_layout = class_field_info.get(&cid)
+                .and_then(|info| info.super_class_id)
+                .filter(|&id| id != 0)
+                .and_then(|pid| class_field_layouts.get(&pid));
+            let own_types = class_field_info.get(&cid)
+                .map(|info| &info.own_field_types[..])
+                .unwrap_or(&[]);
+            let mut layout = Vec::with_capacity(
+                own_types.len() + parent_layout.map_or(0, |p| p.len())
+            );
+            layout.extend_from_slice(own_types);
+            if let Some(parent) = parent_layout {
+                layout.extend_from_slice(parent);
+            }
+            class_field_layouts.insert(cid, layout);
+        }
     }
     log::info!("Resolved field layouts for {} classes", class_field_layouts.len());
 
@@ -1462,7 +1470,8 @@ pub fn calculate_dominators(graph: &HeapGraph) -> Result<Vec<ObjectReport>> {
 
     // Step 2: Build reverse dominator tree (children map)
     // For each node, find all nodes that it dominates (its children in the dominator tree)
-    let mut children: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
+    let node_count = petgraph.node_count();
+    let mut children: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::with_capacity(node_count);
 
     for node_idx in petgraph.node_indices() {
         if node_idx == super_root {
@@ -1479,8 +1488,9 @@ pub fn calculate_dominators(graph: &HeapGraph) -> Result<Vec<ObjectReport>> {
 
     log::debug!("Built children map: {} nodes have children", children.len());
 
-    // Step 3: Calculate shallow sizes for all nodes
-    let mut shallow_sizes: HashMap<NodeIndex, u64> = HashMap::new();
+    // Steps 3+4: Calculate shallow sizes and initialize retained sizes in a single pass
+    let mut shallow_sizes: HashMap<NodeIndex, u64> = HashMap::with_capacity(node_count);
+    let mut retained_sizes: HashMap<NodeIndex, u64> = HashMap::with_capacity(node_count);
 
     for node_idx in petgraph.node_indices() {
         let node_data = &petgraph[node_idx];
@@ -1490,15 +1500,7 @@ pub fn calculate_dominators(graph: &HeapGraph) -> Result<Vec<ObjectReport>> {
             NodeData::Array { size, .. } => *size as u64,
         };
         shallow_sizes.insert(node_idx, shallow_size);
-    }
-
-    // Step 4: Calculate retained sizes via DFS post-order traversal (O(V+E))
-    let mut retained_sizes: HashMap<NodeIndex, u64> = HashMap::new();
-
-    // Initialize all retained sizes to shallow sizes
-    for node_idx in petgraph.node_indices() {
-        let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
-        retained_sizes.insert(node_idx, shallow);
+        retained_sizes.insert(node_idx, shallow_size);
     }
 
     // DFS post-order: process children before parents in a single pass
@@ -1878,7 +1880,7 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
     log::info!("Dominator tree computed successfully");
 
     // Step 1b: Build reverse reference adjacency list from original graph edges
-    let mut reverse_refs: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
+    let mut reverse_refs: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::with_capacity(petgraph.node_count());
     for edge in petgraph.edge_indices() {
         if let Some((source, target)) = petgraph.edge_endpoints(edge) {
             reverse_refs.entry(target).or_insert_with(Vec::new).push(source);
@@ -1890,7 +1892,7 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
     // Nodes unreachable from SuperRoot (no immediate dominator) are attached
     // directly to SuperRoot so their sizes are included in the retained total.
     // Track unreachable shallow size so we can compute reachable-only total.
-    let mut children_map: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
+    let mut children_map: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::with_capacity(petgraph.node_count());
     let mut unreachable_count = 0u64;
     let mut unreachable_shallow_size = 0u64;
     for node_idx in petgraph.node_indices() {
@@ -1914,8 +1916,10 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
     log::info!("Dominator tree: {} unreachable nodes ({:.2} MB) attached to SuperRoot",
         unreachable_count, unreachable_shallow_size as f64 / (1024.0 * 1024.0));
 
-    // Step 3: Calculate shallow sizes
-    let mut shallow_sizes: HashMap<NodeIndex, u64> = HashMap::new();
+    // Steps 3+4: Calculate shallow sizes and initialize retained sizes in a single pass
+    let node_count = petgraph.node_count();
+    let mut shallow_sizes: HashMap<NodeIndex, u64> = HashMap::with_capacity(node_count);
+    let mut retained_sizes: HashMap<NodeIndex, u64> = HashMap::with_capacity(node_count);
     for node_idx in petgraph.node_indices() {
         let node_data = &petgraph[node_idx];
         let shallow_size = match node_data {
@@ -1924,15 +1928,7 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
             NodeData::Array { size, .. } => *size as u64,
         };
         shallow_sizes.insert(node_idx, shallow_size);
-    }
-
-    // Step 4: Calculate retained sizes via DFS post-order traversal (O(V+E))
-    let mut retained_sizes: HashMap<NodeIndex, u64> = HashMap::new();
-
-    // Initialize all retained sizes to shallow sizes
-    for node_idx in petgraph.node_indices() {
-        let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
-        retained_sizes.insert(node_idx, shallow);
+        retained_sizes.insert(node_idx, shallow_size);
     }
 
     // DFS post-order: process children before parents in a single pass
@@ -1966,12 +1962,13 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
 
     log::info!("Calculated retained sizes for {} nodes", retained_sizes.len());
 
-    // Step 5: Build node_data_map and ObjectReports
+    // Steps 5+6: Build node_data_map, ObjectReports, and class histogram in a single pass
     // Use string interning for class names to reduce heap allocations
     let mut class_name_intern: HashMap<String, Arc<str>> = HashMap::new();
     let empty_class: Arc<str> = Arc::from("");
-    let mut node_data_map: HashMap<NodeIndex, (u64, &'static str, Arc<str>)> = HashMap::new();
-    let mut reports: Vec<ObjectReport> = Vec::new();
+    let mut node_data_map: HashMap<NodeIndex, (u64, &'static str, Arc<str>)> = HashMap::with_capacity(node_count);
+    let mut reports: Vec<ObjectReport> = Vec::with_capacity(node_count);
+    let mut histogram_map: HashMap<String, (u64, u64, u64)> = HashMap::new(); // (count, shallow, retained)
 
     for node_idx in petgraph.node_indices() {
         let node_data = &petgraph[node_idx];
@@ -1983,15 +1980,33 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
             NodeData::Root => (0, "Root", empty_class.clone()),
             NodeData::Class => (0, "Class", empty_class.clone()),
             NodeData::Instance { id, class_name, .. } => {
-                let interned = class_name_intern.entry(class_name.clone())
-                    .or_insert_with(|| Arc::from(class_name.as_str()))
-                    .clone();
+                let interned = if let Some(existing) = class_name_intern.get(class_name) {
+                    existing.clone()
+                } else {
+                    let arc: Arc<str> = Arc::from(class_name.as_str());
+                    class_name_intern.insert(class_name.clone(), arc.clone());
+                    arc
+                };
+                // Accumulate histogram in the same pass
+                let entry = histogram_map.entry(class_name.clone()).or_insert((0, 0, 0));
+                entry.0 += 1;
+                entry.1 += shallow;
+                entry.2 += retained;
                 (*id, "Instance", interned)
             }
             NodeData::Array { id, class_name, .. } => {
-                let interned = class_name_intern.entry(class_name.clone())
-                    .or_insert_with(|| Arc::from(class_name.as_str()))
-                    .clone();
+                let interned = if let Some(existing) = class_name_intern.get(class_name) {
+                    existing.clone()
+                } else {
+                    let arc: Arc<str> = Arc::from(class_name.as_str());
+                    class_name_intern.insert(class_name.clone(), arc.clone());
+                    arc
+                };
+                // Accumulate histogram in the same pass
+                let entry = histogram_map.entry(class_name.clone()).or_insert((0, 0, 0));
+                entry.0 += 1;
+                entry.1 += shallow;
+                entry.2 += retained;
                 (*id, "Array", interned)
             }
         };
@@ -2010,23 +2025,6 @@ pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectRe
 
     reports.sort();
     let top_50: Vec<ObjectReport> = reports.into_iter().take(50).collect();
-
-    // Step 6: Compute class histogram
-    let mut histogram_map: HashMap<String, (u64, u64, u64)> = HashMap::new(); // (count, shallow, retained)
-    for node_idx in petgraph.node_indices() {
-        let node_data = &petgraph[node_idx];
-        match node_data {
-            NodeData::Instance { class_name, .. } | NodeData::Array { class_name, .. } => {
-                let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
-                let retained = retained_sizes.get(&node_idx).copied().unwrap_or(0);
-                let entry = histogram_map.entry(class_name.clone()).or_insert((0, 0, 0));
-                entry.0 += 1;
-                entry.1 += shallow;
-                entry.2 += retained;
-            }
-            _ => {}
-        }
-    }
 
     let mut class_histogram: Vec<ClassHistogramEntry> = histogram_map
         .into_iter()
