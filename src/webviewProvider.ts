@@ -1231,10 +1231,15 @@ export function getWebviewContent(_webview: vscode.Webview): string {
             });
         }
         // ---- GC Root Path ----
+        function closeGcPath() {
+            document.getElementById('gc-path-container').innerHTML = '';
+        }
+
         function renderGcRootPath(path) {
             const container = document.getElementById('gc-path-container');
             if (!path || path.length === 0) {
-                container.innerHTML = '<div class="gc-path-breadcrumb"><span class="gc-path-label">GC Path</span><span style="opacity:0.5;font-size:12px;">No path to GC root found</span><button class="gc-path-close" onclick="document.getElementById(\'gc-path-container\').innerHTML=\'\'">&times;</button></div>';
+                container.innerHTML = '<div class="gc-path-breadcrumb"><span class="gc-path-label">GC Path</span><span style="opacity:0.5;font-size:12px;">No path to GC root found</span><button class="gc-path-close">&times;</button></div>';
+                container.querySelector('.gc-path-close').addEventListener('click', closeGcPath);
                 return;
             }
 
@@ -1248,8 +1253,9 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                 if (i > 0) html += '<span class="gc-path-arrow">&#9654;</span>';
                 html += '<span class="gc-path-node ' + cls + '" title="' + escapeHtml(title) + '">' + escapeHtml(label) + '</span>';
             });
-            html += '<button class="gc-path-close" onclick="document.getElementById(\'gc-path-container\').innerHTML=\'\'">&times;</button></div>';
+            html += '<button class="gc-path-close">&times;</button></div>';
             container.innerHTML = html;
+            container.querySelector('.gc-path-close').addEventListener('click', closeGcPath);
         }
 
         // ---- Incident Report ----
