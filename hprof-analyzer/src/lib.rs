@@ -5,6 +5,8 @@
 //! This crate provides a safe interface around memory-mapped file I/O for efficient
 //! parsing of large HPROF files without loading them entirely into RAM.
 
+pub mod heapql;
+
 use anyhow::Result;
 use jvm_hprof::{parse_hprof, RecordTag, IdSize};
 use memmap2::{Mmap, MmapOptions};

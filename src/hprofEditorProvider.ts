@@ -178,6 +178,27 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                         });
                     }
                     break;
+                case 'executeQuery':
+                    this.outputChannel.appendLine(`[HeapLens] executeQuery: ${message.query}`);
+                    try {
+                        const queryResult = await client.sendRequest('execute_query', {
+                            path: hprofPath,
+                            query: message.query
+                        });
+                        webviewPanel.webview.postMessage({
+                            command: 'queryResult',
+                            result: queryResult,
+                            query: message.query
+                        });
+                    } catch (error: any) {
+                        this.outputChannel.appendLine(`[HeapLens] executeQuery error: ${error.message}`);
+                        webviewPanel.webview.postMessage({
+                            command: 'queryError',
+                            error: error.message || String(error),
+                            query: message.query
+                        });
+                    }
+                    break;
                 case 'copyReport':
                     this.handleCopyReport(hprofPath, webviewPanel);
                     break;

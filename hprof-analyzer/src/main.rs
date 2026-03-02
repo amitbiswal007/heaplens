@@ -311,6 +311,24 @@ fn mcp_tool_definitions() -> serde_json::Value {
                     },
                     "required": ["path"]
                 }
+            },
+            {
+                "name": "execute_heapql",
+                "description": "Execute a HeapQL query against a previously analyzed heap dump. HeapQL is a SQL-like language for querying heap data.\n\nTables: instances (object_id, node_type, class_name, shallow_size, retained_size), class_histogram (class_name, instance_count, shallow_size, retained_size), dominator_tree (same as instances; use WHERE object_id = X to drill into a specific node), leak_suspects (class_name, object_id, retained_size, retained_percentage, description).\n\nOperators: =, !=, >, <, >=, <=, LIKE (with % wildcards). Clauses: WHERE, AND, OR, ORDER BY [ASC|DESC], LIMIT.\n\nSpecial commands: :path <id> (GC root path), :refs <id> (referrers), :children <id> (dominator tree children), :info <id> (object details).\n\nExamples:\n- SELECT * FROM class_histogram ORDER BY retained_size DESC LIMIT 10\n- SELECT * FROM instances WHERE class_name LIKE '%Cache%' AND retained_size > 1024\n- :path 12345\n- :info 12345",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute path to the .hprof file (must have been analyzed first)"
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "HeapQL query string"
+                        }
+                    },
+                    "required": ["path", "query"]
+                }
             }
         ]
     })
@@ -515,6 +533,78 @@ fn format_waste_analysis(waste: &WasteAnalysis) -> String {
     out
 }
 
+/// Formats a HeapQL QueryResult as a markdown table for MCP output.
+fn format_query_result(result: &hprof_analyzer::heapql::QueryResult) -> String {
+    let mut out = String::new();
+
+    if result.rows.is_empty() {
+        out.push_str("No results.\n");
+    } else {
+        // Header
+        out.push_str("| ");
+        for col in &result.columns {
+            out.push_str(col);
+            out.push_str(" | ");
+        }
+        out.push('\n');
+
+        // Separator
+        out.push_str("| ");
+        for _ in &result.columns {
+            out.push_str("--- | ");
+        }
+        out.push('\n');
+
+        // Rows (cap at 50 for readability)
+        let max_rows = result.rows.len().min(50);
+        for row in result.rows.iter().take(max_rows) {
+            out.push_str("| ");
+            for (i, val) in row.iter().enumerate() {
+                let col_name = result.columns.get(i).map(|s| s.as_str()).unwrap_or("");
+                let formatted = if col_name.ends_with("_size") || col_name == "shallow_size" || col_name == "retained_size" {
+                    if let Some(n) = val.as_u64() {
+                        fmt_bytes(n)
+                    } else {
+                        format_json_value(val)
+                    }
+                } else {
+                    format_json_value(val)
+                };
+                out.push_str(&formatted);
+                out.push_str(" | ");
+            }
+            out.push('\n');
+        }
+        if result.rows.len() > 50 {
+            out.push_str(&format!("\n... and {} more rows\n", result.rows.len() - 50));
+        }
+    }
+
+    out.push_str(&format!(
+        "\n_Scanned: {} | Matched: {} | Returned: {} | Time: {:.1}ms_\n",
+        result.total_scanned, result.total_matched, result.rows.len(), result.execution_time_ms
+    ));
+    out
+}
+
+/// Formats a JSON value for display.
+fn format_json_value(val: &serde_json::Value) -> String {
+    match val {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => {
+            if let Some(u) = n.as_u64() {
+                u.to_string()
+            } else if let Some(f) = n.as_f64() {
+                format!("{:.2}", f)
+            } else {
+                n.to_string()
+            }
+        }
+        serde_json::Value::Null => "null".into(),
+        other => other.to_string(),
+    }
+}
+
 /// Makes an MCP tool result content block.
 fn mcp_text_result(text: &str, is_error: bool) -> serde_json::Value {
     serde_json::json!({
@@ -602,6 +692,25 @@ fn handle_mcp_tool_call(
             };
             match get_analysis_state_for_path(analysis_states, path) {
                 Ok(state) => mcp_text_result(&format_waste_analysis(&state.waste_analysis), false),
+                Err(e) => mcp_text_result(&e, true),
+            }
+        }
+        "execute_heapql" => {
+            let path = match arguments.get("path").and_then(|v| v.as_str()) {
+                Some(p) => p,
+                None => return mcp_text_result("Missing required parameter: path", true),
+            };
+            let query = match arguments.get("query").and_then(|v| v.as_str()) {
+                Some(q) => q,
+                None => return mcp_text_result("Missing required parameter: query", true),
+            };
+            match get_analysis_state_for_path(analysis_states, path) {
+                Ok(state) => {
+                    match state.execute_query(query) {
+                        Ok(result) => mcp_text_result(&format_query_result(&result), false),
+                        Err(e) => mcp_text_result(&format!("Query error: {}", e), true),
+                    }
+                }
                 Err(e) => mcp_text_result(&e, true),
             }
         }
@@ -823,6 +932,13 @@ async fn run_jsonrpc_server() -> Result<()> {
                         &analysis_states,
                     ).await {
                         eprintln!("Error handling gc_root_path request: {}", e);
+                    }
+                } else if request.method == "execute_query" {
+                    if let Err(e) = handle_execute_query_request(
+                        request,
+                        &analysis_states,
+                    ).await {
+                        eprintln!("Error handling execute_query request: {}", e);
                     }
                 } else {
                     // Unknown method - send error response
@@ -1047,6 +1163,55 @@ async fn handle_gc_root_path_request(
         "id": request_id,
         "result": gc_path
     });
+    send_stdout(&response)?;
+
+    Ok(())
+}
+
+/// Handles an execute_query request.
+async fn handle_execute_query_request(
+    request: JsonRpcRequest,
+    analysis_states: &Arc<RwLock<HashMap<PathBuf, FileAnalysisState>>>,
+) -> Result<()> {
+    let params = request.params.ok_or_else(|| anyhow::anyhow!("Missing params"))?;
+    let path = params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'path' parameter"))?;
+    let query = params
+        .get("query")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'query' parameter"))?;
+
+    let request_id = request.id.ok_or_else(|| anyhow::anyhow!("Request ID required"))?;
+
+    let analysis_states_guard = analysis_states.read()
+        .map_err(|e| anyhow::anyhow!("Failed to read analysis states: {}", e))?;
+
+    let file_state = analysis_states_guard.get(&PathBuf::from(path))
+        .ok_or_else(|| anyhow::anyhow!("No analysis found for file: {}", path))?;
+
+    let state_guard = file_state.state.read()
+        .map_err(|e| anyhow::anyhow!("Failed to read analysis state: {}", e))?;
+
+    let analysis_state = state_guard.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Analysis state not available"))?;
+
+    let response = match analysis_state.execute_query(query) {
+        Ok(result) => serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": result
+        }),
+        Err(e) => serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {
+                "code": -32000,
+                "message": e.to_string()
+            }
+        }),
+    };
     send_stdout(&response)?;
 
     Ok(())

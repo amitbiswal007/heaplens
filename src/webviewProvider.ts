@@ -304,6 +304,71 @@ export function getWebviewContent(_webview: vscode.Webview): string {
             font-size: 13px;
         }
 
+        /* Query tab */
+        .query-container { max-width: 100%; }
+        .query-input-row { display: flex; gap: 8px; margin-bottom: 8px; }
+        .query-input {
+            flex: 1;
+            font-family: var(--vscode-editor-font-family, monospace);
+            font-size: 13px;
+            padding: 8px 12px;
+            background: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border: 1px solid var(--vscode-input-border);
+            border-radius: 4px;
+            resize: vertical;
+        }
+        .query-input:focus { outline: none; border-color: var(--vscode-focusBorder); }
+        .query-actions { display: flex; flex-direction: column; gap: 4px; }
+        .query-run-btn { min-width: 60px; }
+        .query-help-btn { min-width: 60px; font-size: 16px; font-weight: bold; }
+        .query-status {
+            font-size: 12px;
+            opacity: 0.7;
+            margin-bottom: 8px;
+            min-height: 18px;
+        }
+        .query-status.error { color: var(--vscode-editorError-foreground); opacity: 1; }
+        .query-history {
+            display: flex;
+            gap: 4px;
+            flex-wrap: wrap;
+            margin-bottom: 8px;
+        }
+        .query-history-item {
+            padding: 2px 8px;
+            font-size: 11px;
+            background: var(--vscode-editorWidget-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 3px;
+            cursor: pointer;
+            max-width: 300px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .query-history-item:hover { background: var(--vscode-list-hoverBackground); }
+        .query-help {
+            padding: 12px;
+            margin-bottom: 12px;
+            background: var(--vscode-editorWidget-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 4px;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+        .query-help-title { font-weight: bold; font-size: 13px; margin-bottom: 8px; }
+        .query-help-section { margin-bottom: 6px; }
+        .query-help code {
+            background: var(--vscode-textCodeBlock-background);
+            padding: 1px 4px;
+            border-radius: 3px;
+            font-size: 12px;
+        }
+        .query-results { overflow-x: auto; }
+        .query-results table { font-size: 12px; }
+        .query-results th { font-size: 11px; cursor: default; }
+
         .loading {
             padding: 40px;
             text-align: center;
@@ -550,6 +615,7 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         <button class="tab-btn" data-tab="leaks">Leak Suspects</button>
         <button class="tab-btn" data-tab="waste">Waste</button>
         <button class="tab-btn" data-tab="source">Source</button>
+        <button class="tab-btn" data-tab="query">Query</button>
         <button class="tab-btn" data-tab="chat">AI Chat</button>
     </div>
 
@@ -616,7 +682,53 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         <div id="source-table"><div class="loading">Waiting for analysis...</div></div>
     </div>
 
-    <!-- Tab 7: AI Chat -->
+    <!-- Tab 7: Query -->
+    <div id="tab-query" class="tab-content">
+        <div class="query-container">
+            <div class="query-input-row">
+                <textarea class="query-input" id="query-input" placeholder="SELECT * FROM class_histogram ORDER BY retained_size DESC LIMIT 10" rows="3"></textarea>
+                <div class="query-actions">
+                    <button class="btn query-run-btn" id="query-run-btn">Run</button>
+                    <button class="btn query-help-btn" id="query-help-btn" title="Show help">?</button>
+                </div>
+            </div>
+            <div class="query-status" id="query-status"></div>
+            <div class="query-history" id="query-history"></div>
+            <div class="query-help" id="query-help" style="display:none;">
+                <div class="query-help-title">HeapQL Reference</div>
+                <div class="query-help-section">
+                    <b>Tables:</b>
+                    <code>instances</code> (object_id, node_type, class_name, shallow_size, retained_size),
+                    <code>class_histogram</code> (class_name, instance_count, shallow_size, retained_size),
+                    <code>dominator_tree</code> (same as instances; use WHERE object_id = X),
+                    <code>leak_suspects</code> (class_name, object_id, retained_size, retained_percentage, description)
+                </div>
+                <div class="query-help-section">
+                    <b>Syntax:</b> SELECT [columns|*] FROM table [WHERE conditions] [ORDER BY col [ASC|DESC]] [LIMIT n]
+                </div>
+                <div class="query-help-section">
+                    <b>Operators:</b> =, !=, &gt;, &lt;, &gt;=, &lt;=, LIKE (% wildcards). Combine with AND / OR.
+                </div>
+                <div class="query-help-section">
+                    <b>Special commands:</b>
+                    <code>:path &lt;id&gt;</code> GC root path,
+                    <code>:refs &lt;id&gt;</code> referrers,
+                    <code>:children &lt;id&gt;</code> dominator children,
+                    <code>:info &lt;id&gt;</code> object details
+                </div>
+                <div class="query-help-section">
+                    <b>Examples:</b><br>
+                    <code>SELECT * FROM class_histogram ORDER BY retained_size DESC LIMIT 10</code><br>
+                    <code>SELECT * FROM instances WHERE class_name LIKE '%Cache%' AND retained_size &gt; 1024</code><br>
+                    <code>SELECT class_name, retained_size FROM leak_suspects</code><br>
+                    <code>:info 12345</code>
+                </div>
+            </div>
+            <div class="query-results" id="query-results"></div>
+        </div>
+    </div>
+
+    <!-- Tab 8: AI Chat -->
     <div id="tab-chat" class="tab-content">
         <div class="chat-container">
             <div class="chat-messages" id="chat-messages">
@@ -699,6 +811,12 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     break;
                 case 'reportCopied':
                     showReportCopied();
+                    break;
+                case 'queryResult':
+                    renderQueryResult(msg.result, msg.query);
+                    break;
+                case 'queryError':
+                    renderQueryError(msg.error, msg.query);
                     break;
                 case 'error':
                     showError(msg.message);
@@ -1538,6 +1656,123 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     '</div>';
             });
             section.innerHTML = html;
+        }
+
+        // ---- Query Tab ----
+        const queryInput = document.getElementById('query-input');
+        const queryRunBtn = document.getElementById('query-run-btn');
+        const queryHelpBtn = document.getElementById('query-help-btn');
+        const queryHelp = document.getElementById('query-help');
+        const queryStatus = document.getElementById('query-status');
+        const queryResults = document.getElementById('query-results');
+        const queryHistoryEl = document.getElementById('query-history');
+        const queryHistory = [];
+
+        function runQuery() {
+            const q = queryInput.value.trim();
+            if (!q) return;
+            queryStatus.className = 'query-status';
+            queryStatus.textContent = 'Running...';
+            queryResults.innerHTML = '';
+            queryRunBtn.disabled = true;
+            vscode.postMessage({ command: 'executeQuery', query: q });
+        }
+
+        queryRunBtn.addEventListener('click', runQuery);
+
+        queryInput.addEventListener('keydown', function(e) {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                runQuery();
+            }
+        });
+
+        queryHelpBtn.addEventListener('click', function() {
+            queryHelp.style.display = queryHelp.style.display === 'none' ? 'block' : 'none';
+        });
+
+        function addToHistory(q) {
+            const idx = queryHistory.indexOf(q);
+            if (idx !== -1) queryHistory.splice(idx, 1);
+            queryHistory.unshift(q);
+            if (queryHistory.length > 10) queryHistory.pop();
+            renderQueryHistory();
+        }
+
+        function renderQueryHistory() {
+            queryHistoryEl.innerHTML = '';
+            queryHistory.forEach(function(q) {
+                const el = document.createElement('span');
+                el.className = 'query-history-item';
+                el.textContent = q;
+                el.title = q;
+                el.addEventListener('click', function() {
+                    queryInput.value = q;
+                    queryInput.focus();
+                });
+                queryHistoryEl.appendChild(el);
+            });
+        }
+
+        function renderQueryResult(result, query) {
+            queryRunBtn.disabled = false;
+            addToHistory(query);
+
+            const cols = result.columns || [];
+            const rows = result.rows || [];
+            const scanned = result.total_scanned || 0;
+            const matched = result.total_matched || 0;
+            const timeMs = (result.execution_time_ms || 0).toFixed(1);
+
+            queryStatus.className = 'query-status';
+            queryStatus.textContent = rows.length + ' row' + (rows.length !== 1 ? 's' : '') +
+                ' returned (' + matched + ' matched, ' + scanned + ' scanned, ' + timeMs + 'ms)';
+
+            if (rows.length === 0) {
+                queryResults.innerHTML = '<div style="opacity:0.5; padding:12px;">No results</div>';
+                return;
+            }
+
+            // Determine which columns are size columns
+            const sizeCols = new Set(['shallow_size', 'retained_size', 'wasted_bytes', 'total_bytes']);
+
+            let html = '<table><thead><tr>';
+            cols.forEach(function(col) {
+                const isSize = sizeCols.has(col);
+                html += '<th' + (isSize ? ' class="right"' : '') + '>' + escapeHtml(col) + '</th>';
+            });
+            html += '</tr></thead><tbody>';
+
+            rows.forEach(function(row) {
+                html += '<tr>';
+                row.forEach(function(val, i) {
+                    const col = cols[i];
+                    const isSize = sizeCols.has(col);
+                    let display;
+                    if (isSize && typeof val === 'number') {
+                        display = fmt(val);
+                    } else if (typeof val === 'number' && col === 'retained_percentage') {
+                        display = val.toFixed(1) + '%';
+                    } else if (typeof val === 'number') {
+                        display = fmtNum(val);
+                    } else {
+                        display = escapeHtml(String(val == null ? '' : val));
+                    }
+                    html += '<td' + (isSize ? ' class="right"' : '') + '>' + display + '</td>';
+                });
+                html += '</tr>';
+            });
+
+            html += '</tbody></table>';
+            queryResults.innerHTML = html;
+        }
+
+        function renderQueryError(error, query) {
+            queryRunBtn.disabled = false;
+            if (query) addToHistory(query);
+            queryStatus.className = 'query-status error';
+            queryStatus.textContent = 'Error: ' + error;
+            queryResults.innerHTML = '';
         }
     })();
     </script>
