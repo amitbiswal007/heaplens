@@ -297,6 +297,20 @@ fn mcp_tool_definitions() -> serde_json::Value {
                     },
                     "required": ["path"]
                 }
+            },
+            {
+                "name": "get_waste_analysis",
+                "description": "Get waste analysis showing duplicate strings and empty collections. Identifies recoverable memory waste without code changes: duplicate String instances with identical content, and empty HashMap/ArrayList/LinkedHashMap instances.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute path to the .hprof file (must have been analyzed first)"
+                        }
+                    },
+                    "required": ["path"]
+                }
             }
         ]
     })
@@ -378,6 +392,22 @@ fn format_analyze_result(
         }
     }
 
+    // Waste analysis
+    let w = &state.waste_analysis;
+    if w.total_wasted_bytes > 0 {
+        out.push_str("\n## Waste Analysis\n\n");
+        out.push_str(&format!("- **Total Waste:** {} ({:.1}% of heap)\n", fmt_bytes(w.total_wasted_bytes), w.waste_percentage));
+        out.push_str(&format!("- **Duplicate Strings:** {}\n", fmt_bytes(w.duplicate_string_wasted_bytes)));
+        out.push_str(&format!("- **Empty Collections:** {}\n", fmt_bytes(w.empty_collection_wasted_bytes)));
+        if !w.duplicate_strings.is_empty() {
+            out.push_str("\nTop duplicate strings:\n");
+            for ds in w.duplicate_strings.iter().take(5) {
+                let preview = if ds.preview.len() > 60 { &ds.preview[..60] } else { &ds.preview };
+                out.push_str(&format!("- \"{}\" x{} (wastes {})\n", preview, ds.count, fmt_bytes(ds.wasted_bytes)));
+            }
+        }
+    }
+
     out
 }
 
@@ -446,6 +476,42 @@ fn format_summary(summary: &hprof_analyzer::HeapSummary) -> String {
     out.push_str(&format!("- **Total Classes:** {}\n", summary.total_classes));
     out.push_str(&format!("- **Total Arrays:** {}\n", summary.total_arrays));
     out.push_str(&format!("- **GC Roots:** {}\n", summary.total_gc_roots));
+    out
+}
+
+/// Formats waste analysis as standalone markdown.
+fn format_waste_analysis(waste: &WasteAnalysis) -> String {
+    if waste.total_wasted_bytes == 0 {
+        return "No significant memory waste detected. No duplicate strings or empty collections found.".to_string();
+    }
+
+    let mut out = String::from("## Waste Analysis\n\n");
+    out.push_str(&format!("- **Total Waste:** {} ({:.1}% of heap)\n", fmt_bytes(waste.total_wasted_bytes), waste.waste_percentage));
+    out.push_str(&format!("- **Duplicate Strings:** {}\n", fmt_bytes(waste.duplicate_string_wasted_bytes)));
+    out.push_str(&format!("- **Empty Collections:** {}\n\n", fmt_bytes(waste.empty_collection_wasted_bytes)));
+
+    if !waste.duplicate_strings.is_empty() {
+        let count = waste.duplicate_strings.len().min(20);
+        out.push_str(&format!("### Duplicate Strings (top {} of {})\n\n", count, waste.duplicate_strings.len()));
+        out.push_str("| # | Preview | Copies | Wasted | Total |\n");
+        out.push_str("|---|---------|--------|--------|-------|\n");
+        for (i, ds) in waste.duplicate_strings.iter().take(count).enumerate() {
+            let preview = if ds.preview.len() > 60 { format!("{}...", &ds.preview[..60]) } else { ds.preview.clone() };
+            out.push_str(&format!("| {} | \"{}\" | {} | {} | {} |\n",
+                i + 1, preview, ds.count, fmt_bytes(ds.wasted_bytes), fmt_bytes(ds.total_bytes)));
+        }
+        out.push('\n');
+    }
+
+    if !waste.empty_collections.is_empty() {
+        out.push_str(&format!("### Empty Collections ({} types)\n\n", waste.empty_collections.len()));
+        out.push_str("| Class | Count | Wasted |\n");
+        out.push_str("|-------|-------|--------|\n");
+        for ec in &waste.empty_collections {
+            out.push_str(&format!("| {} | {} | {} |\n", ec.class_name, ec.count, fmt_bytes(ec.wasted_bytes)));
+        }
+    }
+
     out
 }
 
@@ -526,6 +592,16 @@ fn handle_mcp_tool_call(
             };
             match get_analysis_state_for_path(analysis_states, path) {
                 Ok(state) => mcp_text_result(&format_summary(&state.summary), false),
+                Err(e) => mcp_text_result(&e, true),
+            }
+        }
+        "get_waste_analysis" => {
+            let path = match arguments.get("path").and_then(|v| v.as_str()) {
+                Some(p) => p,
+                None => return mcp_text_result("Missing required parameter: path", true),
+            };
+            match get_analysis_state_for_path(analysis_states, path) {
+                Ok(state) => mcp_text_result(&format_waste_analysis(&state.waste_analysis), false),
                 Err(e) => mcp_text_result(&e, true),
             }
         }

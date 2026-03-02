@@ -452,6 +452,40 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
             lines.push('');
         }
 
+        // Waste Analysis
+        if (data.wasteAnalysis && data.wasteAnalysis.total_wasted_bytes > 0) {
+            const w = data.wasteAnalysis;
+            lines.push('## Waste Analysis');
+            lines.push('');
+            lines.push(`- **Total Waste:** ${this.fmtBytes(w.total_wasted_bytes)} (${w.waste_percentage.toFixed(1)}% of heap)`);
+            lines.push(`- **Duplicate Strings:** ${this.fmtBytes(w.duplicate_string_wasted_bytes)}`);
+            lines.push(`- **Empty Collections:** ${this.fmtBytes(w.empty_collection_wasted_bytes)}`);
+
+            if (w.duplicate_strings && w.duplicate_strings.length > 0) {
+                lines.push('');
+                lines.push('**Top Duplicate Strings:**');
+                lines.push('');
+                lines.push('| Preview | Copies | Wasted |');
+                lines.push('|---------|--------|--------|');
+                w.duplicate_strings.slice(0, 10).forEach((d: any) => {
+                    const preview = (d.preview || '(empty)').substring(0, 60).replace(/\|/g, '\\|');
+                    lines.push(`| ${preview} | ${d.count.toLocaleString()} | ${this.fmtBytes(d.wasted_bytes)} |`);
+                });
+            }
+
+            if (w.empty_collections && w.empty_collections.length > 0) {
+                lines.push('');
+                lines.push('**Empty Collections:**');
+                lines.push('');
+                lines.push('| Class | Count | Wasted |');
+                lines.push('|-------|-------|--------|');
+                w.empty_collections.forEach((e: any) => {
+                    lines.push(`| ${e.class_name} | ${e.count.toLocaleString()} | ${this.fmtBytes(e.wasted_bytes)} |`);
+                });
+            }
+            lines.push('');
+        }
+
         const report = lines.join('\n');
         vscode.env.clipboard.writeText(report).then(() => {
             webviewPanel.webview.postMessage({ command: 'reportCopied' });
