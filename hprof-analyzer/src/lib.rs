@@ -1943,6 +1943,290 @@ pub struct WasteAnalysis {
     pub empty_collections: Vec<EmptyCollectionGroup>,
 }
 
+// ============================================================================
+// Heap Comparison
+// ============================================================================
+
+/// Summary delta between two heap dumps.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HeapSummaryDelta {
+    pub baseline_total_heap_size: u64,
+    pub current_total_heap_size: u64,
+    pub total_heap_size_delta: i64,
+    pub baseline_reachable_heap_size: u64,
+    pub current_reachable_heap_size: u64,
+    pub reachable_heap_size_delta: i64,
+    pub baseline_total_instances: u64,
+    pub current_total_instances: u64,
+    pub total_instances_delta: i64,
+    pub baseline_total_classes: u64,
+    pub current_total_classes: u64,
+    pub total_classes_delta: i64,
+    pub baseline_total_arrays: u64,
+    pub current_total_arrays: u64,
+    pub total_arrays_delta: i64,
+    pub baseline_total_gc_roots: u64,
+    pub current_total_gc_roots: u64,
+    pub total_gc_roots_delta: i64,
+}
+
+/// Per-class delta between two heap dumps.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ClassHistogramDelta {
+    pub class_name: String,
+    pub instance_count_delta: i64,
+    pub shallow_size_delta: i64,
+    pub retained_size_delta: i64,
+    pub baseline_instance_count: u64,
+    pub baseline_shallow_size: u64,
+    pub baseline_retained_size: u64,
+    pub current_instance_count: u64,
+    pub current_shallow_size: u64,
+    pub current_retained_size: u64,
+    /// One of: "grew", "shrank", "new", "removed", "unchanged"
+    pub change_type: String,
+}
+
+/// Change in a leak suspect between two heap dumps.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LeakSuspectChange {
+    pub class_name: String,
+    /// One of: "new", "resolved", "persisted"
+    pub change_type: String,
+    pub current_retained_size: u64,
+    pub current_retained_percentage: f64,
+    pub baseline_retained_size: u64,
+    pub baseline_retained_percentage: f64,
+    pub retained_size_delta: i64,
+    pub retained_percentage_delta: f64,
+    pub description: String,
+}
+
+/// Waste delta between two heap dumps.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WasteDelta {
+    pub baseline_total_wasted_bytes: u64,
+    pub current_total_wasted_bytes: u64,
+    pub total_wasted_delta: i64,
+    pub baseline_waste_percentage: f64,
+    pub current_waste_percentage: f64,
+    pub waste_percentage_delta: f64,
+    pub duplicate_string_wasted_delta: i64,
+    pub empty_collection_wasted_delta: i64,
+}
+
+/// Full comparison result between a baseline and current heap dump.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HeapComparisonResult {
+    pub baseline_path: String,
+    pub current_path: String,
+    pub summary_delta: HeapSummaryDelta,
+    pub histogram_delta: Vec<ClassHistogramDelta>,
+    pub leak_suspect_changes: Vec<LeakSuspectChange>,
+    pub waste_delta: WasteDelta,
+}
+
+/// Compares two heap analysis states and returns a detailed delta.
+pub fn compare_heaps(
+    baseline: &AnalysisState,
+    current: &AnalysisState,
+    baseline_path: &str,
+    current_path: &str,
+) -> HeapComparisonResult {
+    let bs = &baseline.summary;
+    let cs = &current.summary;
+
+    // Summary delta
+    let summary_delta = HeapSummaryDelta {
+        baseline_total_heap_size: bs.total_heap_size,
+        current_total_heap_size: cs.total_heap_size,
+        total_heap_size_delta: cs.total_heap_size as i64 - bs.total_heap_size as i64,
+        baseline_reachable_heap_size: bs.reachable_heap_size,
+        current_reachable_heap_size: cs.reachable_heap_size,
+        reachable_heap_size_delta: cs.reachable_heap_size as i64 - bs.reachable_heap_size as i64,
+        baseline_total_instances: bs.total_instances,
+        current_total_instances: cs.total_instances,
+        total_instances_delta: cs.total_instances as i64 - bs.total_instances as i64,
+        baseline_total_classes: bs.total_classes,
+        current_total_classes: cs.total_classes,
+        total_classes_delta: cs.total_classes as i64 - bs.total_classes as i64,
+        baseline_total_arrays: bs.total_arrays,
+        current_total_arrays: cs.total_arrays,
+        total_arrays_delta: cs.total_arrays as i64 - bs.total_arrays as i64,
+        baseline_total_gc_roots: bs.total_gc_roots,
+        current_total_gc_roots: cs.total_gc_roots,
+        total_gc_roots_delta: cs.total_gc_roots as i64 - bs.total_gc_roots as i64,
+    };
+
+    // Histogram delta: build baseline lookup by class_name
+    let baseline_hist: HashMap<&str, &ClassHistogramEntry> = baseline
+        .class_histogram
+        .iter()
+        .map(|e| (e.class_name.as_str(), e))
+        .collect();
+    let current_hist: HashMap<&str, &ClassHistogramEntry> = current
+        .class_histogram
+        .iter()
+        .map(|e| (e.class_name.as_str(), e))
+        .collect();
+
+    let mut histogram_delta: Vec<ClassHistogramDelta> = Vec::new();
+
+    // Process current classes
+    for ce in &current.class_histogram {
+        if let Some(be) = baseline_hist.get(ce.class_name.as_str()) {
+            let inst_delta = ce.instance_count as i64 - be.instance_count as i64;
+            let shallow_delta = ce.shallow_size as i64 - be.shallow_size as i64;
+            let retained_delta = ce.retained_size as i64 - be.retained_size as i64;
+            let change_type = if retained_delta > 0 {
+                "grew"
+            } else if retained_delta < 0 {
+                "shrank"
+            } else {
+                "unchanged"
+            };
+            histogram_delta.push(ClassHistogramDelta {
+                class_name: ce.class_name.clone(),
+                instance_count_delta: inst_delta,
+                shallow_size_delta: shallow_delta,
+                retained_size_delta: retained_delta,
+                baseline_instance_count: be.instance_count,
+                baseline_shallow_size: be.shallow_size,
+                baseline_retained_size: be.retained_size,
+                current_instance_count: ce.instance_count,
+                current_shallow_size: ce.shallow_size,
+                current_retained_size: ce.retained_size,
+                change_type: change_type.to_string(),
+            });
+        } else {
+            // New class: not in baseline
+            histogram_delta.push(ClassHistogramDelta {
+                class_name: ce.class_name.clone(),
+                instance_count_delta: ce.instance_count as i64,
+                shallow_size_delta: ce.shallow_size as i64,
+                retained_size_delta: ce.retained_size as i64,
+                baseline_instance_count: 0,
+                baseline_shallow_size: 0,
+                baseline_retained_size: 0,
+                current_instance_count: ce.instance_count,
+                current_shallow_size: ce.shallow_size,
+                current_retained_size: ce.retained_size,
+                change_type: "new".to_string(),
+            });
+        }
+    }
+
+    // Process removed classes (in baseline but not in current)
+    for be in &baseline.class_histogram {
+        if !current_hist.contains_key(be.class_name.as_str()) {
+            histogram_delta.push(ClassHistogramDelta {
+                class_name: be.class_name.clone(),
+                instance_count_delta: -(be.instance_count as i64),
+                shallow_size_delta: -(be.shallow_size as i64),
+                retained_size_delta: -(be.retained_size as i64),
+                baseline_instance_count: be.instance_count,
+                baseline_shallow_size: be.shallow_size,
+                baseline_retained_size: be.retained_size,
+                current_instance_count: 0,
+                current_shallow_size: 0,
+                current_retained_size: 0,
+                change_type: "removed".to_string(),
+            });
+        }
+    }
+
+    // Sort by absolute retained_size_delta descending
+    histogram_delta.sort_by(|a, b| {
+        b.retained_size_delta
+            .abs()
+            .cmp(&a.retained_size_delta.abs())
+    });
+
+    // Leak suspect changes
+    let baseline_suspects: HashMap<&str, &LeakSuspect> = baseline
+        .leak_suspects
+        .iter()
+        .map(|s| (s.class_name.as_str(), s))
+        .collect();
+    let current_suspects: HashMap<&str, &LeakSuspect> = current
+        .leak_suspects
+        .iter()
+        .map(|s| (s.class_name.as_str(), s))
+        .collect();
+
+    let mut leak_suspect_changes: Vec<LeakSuspectChange> = Vec::new();
+
+    for cs_entry in &current.leak_suspects {
+        if let Some(bs_entry) = baseline_suspects.get(cs_entry.class_name.as_str()) {
+            leak_suspect_changes.push(LeakSuspectChange {
+                class_name: cs_entry.class_name.clone(),
+                change_type: "persisted".to_string(),
+                current_retained_size: cs_entry.retained_size,
+                current_retained_percentage: cs_entry.retained_percentage,
+                baseline_retained_size: bs_entry.retained_size,
+                baseline_retained_percentage: bs_entry.retained_percentage,
+                retained_size_delta: cs_entry.retained_size as i64 - bs_entry.retained_size as i64,
+                retained_percentage_delta: cs_entry.retained_percentage
+                    - bs_entry.retained_percentage,
+                description: cs_entry.description.clone(),
+            });
+        } else {
+            leak_suspect_changes.push(LeakSuspectChange {
+                class_name: cs_entry.class_name.clone(),
+                change_type: "new".to_string(),
+                current_retained_size: cs_entry.retained_size,
+                current_retained_percentage: cs_entry.retained_percentage,
+                baseline_retained_size: 0,
+                baseline_retained_percentage: 0.0,
+                retained_size_delta: cs_entry.retained_size as i64,
+                retained_percentage_delta: cs_entry.retained_percentage,
+                description: cs_entry.description.clone(),
+            });
+        }
+    }
+
+    for bs_entry in &baseline.leak_suspects {
+        if !current_suspects.contains_key(bs_entry.class_name.as_str()) {
+            leak_suspect_changes.push(LeakSuspectChange {
+                class_name: bs_entry.class_name.clone(),
+                change_type: "resolved".to_string(),
+                current_retained_size: 0,
+                current_retained_percentage: 0.0,
+                baseline_retained_size: bs_entry.retained_size,
+                baseline_retained_percentage: bs_entry.retained_percentage,
+                retained_size_delta: -(bs_entry.retained_size as i64),
+                retained_percentage_delta: -bs_entry.retained_percentage,
+                description: format!("Previously: {}", bs_entry.description),
+            });
+        }
+    }
+
+    // Waste delta
+    let bw = &baseline.waste_analysis;
+    let cw = &current.waste_analysis;
+    let waste_delta = WasteDelta {
+        baseline_total_wasted_bytes: bw.total_wasted_bytes,
+        current_total_wasted_bytes: cw.total_wasted_bytes,
+        total_wasted_delta: cw.total_wasted_bytes as i64 - bw.total_wasted_bytes as i64,
+        baseline_waste_percentage: bw.waste_percentage,
+        current_waste_percentage: cw.waste_percentage,
+        waste_percentage_delta: cw.waste_percentage - bw.waste_percentage,
+        duplicate_string_wasted_delta: cw.duplicate_string_wasted_bytes as i64
+            - bw.duplicate_string_wasted_bytes as i64,
+        empty_collection_wasted_delta: cw.empty_collection_wasted_bytes as i64
+            - bw.empty_collection_wasted_bytes as i64,
+    };
+
+    HeapComparisonResult {
+        baseline_path: baseline_path.to_string(),
+        current_path: current_path.to_string(),
+        summary_delta,
+        histogram_delta,
+        leak_suspect_changes,
+        waste_delta,
+    }
+}
+
 /// Summary statistics for the entire heap dump.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct HeapSummary {
@@ -2926,5 +3210,139 @@ mod tests {
             path[0].node_type
         );
         assert_eq!(path[1].object_id, 42);
+    }
+
+    #[test]
+    fn test_compare_heaps() {
+        let sr = NodeIndex::new(0);
+        let root = NodeIndex::new(1);
+
+        // Baseline state: has class A and B, leak suspect on A
+        let mut baseline = make_test_state(
+            &[(sr, root)],
+            &[
+                (sr, 0, "SuperRoot", ""),
+                (root, 0, "Root", ""),
+            ],
+            sr,
+        );
+        baseline.summary = HeapSummary {
+            total_heap_size: 10000,
+            reachable_heap_size: 8000,
+            total_instances: 100,
+            total_classes: 5,
+            total_arrays: 10,
+            total_gc_roots: 2,
+        };
+        baseline.class_histogram = vec![
+            ClassHistogramEntry {
+                class_name: "com.example.A".to_string(),
+                instance_count: 50,
+                shallow_size: 2000,
+                retained_size: 5000,
+            },
+            ClassHistogramEntry {
+                class_name: "com.example.B".to_string(),
+                instance_count: 30,
+                shallow_size: 1000,
+                retained_size: 2000,
+            },
+        ];
+        baseline.leak_suspects = vec![LeakSuspect {
+            class_name: "com.example.A".to_string(),
+            object_id: 1,
+            retained_size: 5000,
+            retained_percentage: 50.0,
+            description: "Retains 50% of heap".to_string(),
+        }];
+        baseline.waste_analysis = WasteAnalysis {
+            total_wasted_bytes: 500,
+            waste_percentage: 5.0,
+            duplicate_string_wasted_bytes: 300,
+            empty_collection_wasted_bytes: 200,
+            duplicate_strings: vec![],
+            empty_collections: vec![],
+        };
+
+        // Current state: A grew, B removed, C is new, new leak suspect on C
+        let mut current = make_test_state(
+            &[(sr, root)],
+            &[
+                (sr, 0, "SuperRoot", ""),
+                (root, 0, "Root", ""),
+            ],
+            sr,
+        );
+        current.summary = HeapSummary {
+            total_heap_size: 15000,
+            reachable_heap_size: 12000,
+            total_instances: 150,
+            total_classes: 6,
+            total_arrays: 15,
+            total_gc_roots: 3,
+        };
+        current.class_histogram = vec![
+            ClassHistogramEntry {
+                class_name: "com.example.A".to_string(),
+                instance_count: 80,
+                shallow_size: 3000,
+                retained_size: 8000,
+            },
+            ClassHistogramEntry {
+                class_name: "com.example.C".to_string(),
+                instance_count: 20,
+                shallow_size: 500,
+                retained_size: 1500,
+            },
+        ];
+        current.leak_suspects = vec![LeakSuspect {
+            class_name: "com.example.C".to_string(),
+            object_id: 2,
+            retained_size: 1500,
+            retained_percentage: 10.0,
+            description: "New suspect".to_string(),
+        }];
+        current.waste_analysis = WasteAnalysis {
+            total_wasted_bytes: 800,
+            waste_percentage: 5.3,
+            duplicate_string_wasted_bytes: 600,
+            empty_collection_wasted_bytes: 200,
+            duplicate_strings: vec![],
+            empty_collections: vec![],
+        };
+
+        let result = compare_heaps(&baseline, &current, "/tmp/baseline.hprof", "/tmp/current.hprof");
+
+        // Summary delta
+        assert_eq!(result.summary_delta.total_heap_size_delta, 5000);
+        assert_eq!(result.summary_delta.reachable_heap_size_delta, 4000);
+        assert_eq!(result.summary_delta.total_instances_delta, 50);
+
+        // Histogram delta
+        assert_eq!(result.histogram_delta.len(), 3); // A grew, B removed, C new
+        let a_delta = result.histogram_delta.iter().find(|d| d.class_name == "com.example.A").unwrap();
+        assert_eq!(a_delta.change_type, "grew");
+        assert_eq!(a_delta.retained_size_delta, 3000);
+
+        let b_delta = result.histogram_delta.iter().find(|d| d.class_name == "com.example.B").unwrap();
+        assert_eq!(b_delta.change_type, "removed");
+        assert_eq!(b_delta.retained_size_delta, -2000);
+
+        let c_delta = result.histogram_delta.iter().find(|d| d.class_name == "com.example.C").unwrap();
+        assert_eq!(c_delta.change_type, "new");
+        assert_eq!(c_delta.retained_size_delta, 1500);
+
+        // Leak suspect changes
+        assert_eq!(result.leak_suspect_changes.len(), 2); // A resolved, C new
+        let a_leak = result.leak_suspect_changes.iter().find(|l| l.class_name == "com.example.A").unwrap();
+        assert_eq!(a_leak.change_type, "resolved");
+
+        let c_leak = result.leak_suspect_changes.iter().find(|l| l.class_name == "com.example.C").unwrap();
+        assert_eq!(c_leak.change_type, "new");
+
+        // Waste delta
+        assert_eq!(result.waste_delta.total_wasted_delta, 300);
+        assert_eq!(result.waste_delta.duplicate_string_wasted_delta, 300);
+        assert_eq!(result.waste_delta.empty_collection_wasted_delta, 0);
     }
 }

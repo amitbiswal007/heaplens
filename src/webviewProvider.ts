@@ -596,6 +596,90 @@ export function getWebviewContent(_webview: vscode.Webview): string {
             margin: 20px 0 10px 0;
             opacity: 0.9;
         }
+        /* Compare tab */
+        .compare-controls {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        .compare-select {
+            padding: 6px 12px;
+            background: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border: 1px solid var(--vscode-input-border);
+            border-radius: 4px;
+            font-size: 13px;
+            min-width: 300px;
+            max-width: 500px;
+        }
+        .compare-select:focus {
+            outline: none;
+            border-color: var(--vscode-focusBorder);
+        }
+        .compare-status {
+            font-size: 12px;
+            opacity: 0.7;
+            margin-left: 8px;
+        }
+        .compare-status.error { color: var(--vscode-editorError-foreground); opacity: 1; }
+        .delta-positive { color: var(--vscode-editorError-foreground, #f44); }
+        .delta-negative { color: var(--vscode-testing-iconPassed, #388a34); }
+        .delta-zero { opacity: 0.5; }
+        .change-badge {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+        .change-badge.new { background: var(--vscode-editorError-foreground); color: #fff; }
+        .change-badge.removed { background: var(--vscode-testing-iconPassed, #388a34); color: #fff; }
+        .change-badge.grew { background: var(--vscode-editorWarning-foreground); color: var(--vscode-editor-background); }
+        .change-badge.shrank { background: var(--vscode-focusBorder); color: #fff; }
+        .change-badge.unchanged { background: var(--vscode-panel-border); opacity: 0.6; }
+        .change-badge.resolved { background: var(--vscode-testing-iconPassed, #388a34); color: #fff; }
+        .change-badge.persisted { background: var(--vscode-editorWarning-foreground); color: var(--vscode-editor-background); }
+        .compare-section-title {
+            font-size: 15px;
+            font-weight: bold;
+            margin: 24px 0 12px 0;
+        }
+        .compare-stat-card {
+            padding: 12px 20px;
+            background: var(--vscode-editorWidget-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 4px;
+            min-width: 160px;
+        }
+        .compare-stat-card .label {
+            font-size: 11px;
+            text-transform: uppercase;
+            opacity: 0.7;
+            margin-bottom: 4px;
+        }
+        .compare-stat-card .value {
+            font-size: 18px;
+            font-weight: bold;
+        }
+        .compare-stat-card .delta {
+            font-size: 12px;
+            margin-top: 2px;
+        }
+        .compare-leak-card {
+            padding: 14px 16px;
+            margin-bottom: 10px;
+            background: var(--vscode-editorWidget-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 6px;
+            border-left: 4px solid var(--vscode-panel-border);
+        }
+        .compare-leak-card.new { border-left-color: var(--vscode-editorError-foreground); }
+        .compare-leak-card.resolved { border-left-color: var(--vscode-testing-iconPassed, #388a34); }
+        .compare-leak-card.persisted { border-left-color: var(--vscode-editorWarning-foreground); }
+
         .waste-preview {
             max-width: 400px;
             overflow: hidden;
@@ -616,6 +700,7 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         <button class="tab-btn" data-tab="waste">Waste</button>
         <button class="tab-btn" data-tab="source">Source</button>
         <button class="tab-btn" data-tab="query">Query</button>
+        <button class="tab-btn" data-tab="compare">Compare</button>
         <button class="tab-btn" data-tab="chat">AI Chat</button>
     </div>
 
@@ -728,7 +813,20 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         </div>
     </div>
 
-    <!-- Tab 8: AI Chat -->
+    <!-- Tab 8: Compare -->
+    <div id="tab-compare" class="tab-content">
+        <div class="compare-controls">
+            <label for="compare-select" style="font-size:13px; margin-right:8px;">Baseline file:</label>
+            <select class="compare-select" id="compare-select">
+                <option value="">-- Select a baseline --</option>
+            </select>
+            <button class="btn" id="compare-btn" disabled>Compare</button>
+            <span class="compare-status" id="compare-status"></span>
+        </div>
+        <div id="compare-results"></div>
+    </div>
+
+    <!-- Tab 9: AI Chat -->
     <div id="tab-chat" class="tab-content">
         <div class="chat-container">
             <div class="chat-messages" id="chat-messages">
@@ -772,6 +870,9 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                 document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
                 btn.classList.add('active');
                 document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+                if (btn.dataset.tab === 'compare') {
+                    vscode.postMessage({ command: 'listAnalyzedFiles' });
+                }
             });
         });
 
@@ -817,6 +918,15 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     break;
                 case 'queryError':
                     renderQueryError(msg.error, msg.query);
+                    break;
+                case 'analyzedFiles':
+                    populateBaselineDropdown(msg.files || []);
+                    break;
+                case 'compareResult':
+                    renderCompareResult(msg.result);
+                    break;
+                case 'compareError':
+                    renderCompareError(msg.error);
                     break;
                 case 'error':
                     showError(msg.message);
@@ -1773,6 +1883,211 @@ export function getWebviewContent(_webview: vscode.Webview): string {
             queryStatus.className = 'query-status error';
             queryStatus.textContent = 'Error: ' + error;
             queryResults.innerHTML = '';
+        }
+
+        // ---- Compare tab ----
+        const compareSelect = document.getElementById('compare-select');
+        const compareBtn = document.getElementById('compare-btn');
+        const compareStatus = document.getElementById('compare-status');
+        const compareResults = document.getElementById('compare-results');
+
+        compareSelect.addEventListener('change', function() {
+            compareBtn.disabled = !compareSelect.value;
+        });
+
+        compareBtn.addEventListener('click', function() {
+            if (!compareSelect.value) return;
+            compareBtn.disabled = true;
+            compareStatus.className = 'compare-status';
+            compareStatus.textContent = 'Comparing...';
+            compareResults.innerHTML = '';
+            vscode.postMessage({
+                command: 'compareHeaps',
+                baselinePath: compareSelect.value
+            });
+        });
+
+        function populateBaselineDropdown(files) {
+            const current = compareSelect.value;
+            compareSelect.innerHTML = '<option value="">-- Select a baseline --</option>';
+            files.forEach(function(f) {
+                const opt = document.createElement('option');
+                opt.value = f;
+                // Show just the filename for readability
+                const parts = f.replace(/\\\\/g, '/').split('/');
+                opt.textContent = parts[parts.length - 1] + ' (' + f + ')';
+                compareSelect.appendChild(opt);
+            });
+            if (current && files.indexOf(current) !== -1) {
+                compareSelect.value = current;
+            }
+            compareBtn.disabled = !compareSelect.value;
+            if (files.length === 0) {
+                compareStatus.className = 'compare-status';
+                compareStatus.textContent = 'No other analyzed files available. Open and analyze another .hprof file first.';
+            } else {
+                compareStatus.textContent = '';
+            }
+        }
+
+        function fmtDelta(bytes) {
+            if (bytes === 0) return '0 B';
+            var sign = bytes > 0 ? '+' : '-';
+            var abs = Math.abs(bytes);
+            return sign + fmt(abs);
+        }
+
+        function deltaClass(value) {
+            if (value > 0) return 'delta-positive';
+            if (value < 0) return 'delta-negative';
+            return 'delta-zero';
+        }
+
+        function renderCompareResult(result) {
+            compareBtn.disabled = false;
+            compareStatus.className = 'compare-status';
+            compareStatus.textContent = '';
+
+            var html = '';
+            var sd = result.summary_delta;
+
+            // Summary delta cards
+            html += '<div class="compare-section-title">Summary Delta</div>';
+            html += '<div class="stats-bar">';
+            html += compareStatCard('Total Heap', fmt(sd.current_total_heap_size), sd.total_heap_size_delta, true);
+            html += compareStatCard('Reachable', fmt(sd.current_reachable_heap_size), sd.reachable_heap_size_delta, true);
+            html += compareStatCard('Instances', fmtNum(sd.current_total_instances), sd.total_instances_delta, false);
+            html += compareStatCard('Classes', fmtNum(sd.current_total_classes), sd.total_classes_delta, false);
+            html += compareStatCard('Arrays', fmtNum(sd.current_total_arrays), sd.total_arrays_delta, false);
+            html += compareStatCard('GC Roots', fmtNum(sd.current_total_gc_roots), sd.total_gc_roots_delta, false);
+            html += '</div>';
+
+            // Histogram delta table
+            var hd = result.histogram_delta || [];
+            if (hd.length > 0) {
+                var cap = Math.min(hd.length, 200);
+                html += '<div class="compare-section-title">Class Changes (' + hd.length + ' classes)</div>';
+                html += '<input type="text" class="search-box" id="compare-hist-search" placeholder="Filter by class name...">';
+                html += '<div id="compare-hist-table">';
+                html += buildCompareHistTable(hd, cap, '');
+                html += '</div>';
+            }
+
+            // Leak suspect changes
+            var lsc = result.leak_suspect_changes || [];
+            if (lsc.length > 0) {
+                html += '<div class="compare-section-title">Leak Suspect Changes</div>';
+                lsc.forEach(function(l) {
+                    var cardClass = 'compare-leak-card ' + l.change_type;
+                    html += '<div class="' + cardClass + '">';
+                    html += '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">';
+                    html += '<span style="font-weight:bold; font-size:14px;">' + escapeHtml(l.class_name) + '</span>';
+                    html += '<span class="change-badge ' + l.change_type + '">' + l.change_type + '</span>';
+                    html += '</div>';
+                    html += '<div style="font-size:13px; opacity:0.8; margin-bottom:4px;">' + escapeHtml(l.description) + '</div>';
+                    if (l.change_type === 'persisted' || l.change_type === 'new') {
+                        html += '<div style="font-size:12px; opacity:0.7;">';
+                        if (l.baseline_retained_size > 0) {
+                            html += 'Baseline: ' + fmt(l.baseline_retained_size) + ' (' + l.baseline_retained_percentage.toFixed(1) + '%)';
+                            html += ' &rarr; ';
+                        }
+                        html += 'Current: ' + fmt(l.current_retained_size) + ' (' + l.current_retained_percentage.toFixed(1) + '%)';
+                        if (l.retained_size_delta !== 0) {
+                            html += ' <span class="' + deltaClass(l.retained_size_delta) + '">(' + fmtDelta(l.retained_size_delta) + ')</span>';
+                        }
+                        html += '</div>';
+                    } else if (l.change_type === 'resolved') {
+                        html += '<div style="font-size:12px; opacity:0.7;">Was: ' + fmt(l.baseline_retained_size) + ' (' + l.baseline_retained_percentage.toFixed(1) + '%)</div>';
+                    }
+                    html += '</div>';
+                });
+            }
+
+            // Waste delta
+            var wd = result.waste_delta;
+            if (wd) {
+                html += '<div class="compare-section-title">Waste Delta</div>';
+                html += '<div class="stats-bar">';
+                html += compareStatCard('Total Waste', fmt(wd.current_total_wasted_bytes), wd.total_wasted_delta, true);
+                html += compareStatCard('Waste %', wd.current_waste_percentage.toFixed(1) + '%', wd.waste_percentage_delta, false, true);
+                html += compareStatCard('Dup. Strings', fmtDelta(wd.duplicate_string_wasted_delta), wd.duplicate_string_wasted_delta, false);
+                html += compareStatCard('Empty Colls.', fmtDelta(wd.empty_collection_wasted_delta), wd.empty_collection_wasted_delta, false);
+                html += '</div>';
+            }
+
+            compareResults.innerHTML = html;
+
+            // Wire up histogram search filter
+            var histSearch = document.getElementById('compare-hist-search');
+            if (histSearch) {
+                histSearch.addEventListener('input', function() {
+                    var filter = histSearch.value.toLowerCase();
+                    var table = document.getElementById('compare-hist-table');
+                    if (table) {
+                        table.innerHTML = buildCompareHistTable(hd, 200, filter);
+                    }
+                });
+            }
+        }
+
+        function compareStatCard(label, value, delta, isBytes, isPct) {
+            var deltaStr;
+            if (isPct) {
+                deltaStr = (delta >= 0 ? '+' : '') + delta.toFixed(1) + 'pp';
+            } else if (isBytes) {
+                deltaStr = fmtDelta(delta);
+            } else {
+                deltaStr = (delta >= 0 ? '+' : '') + fmtNum(delta);
+            }
+            return '<div class="compare-stat-card">' +
+                '<div class="label">' + escapeHtml(label) + '</div>' +
+                '<div class="value">' + value + '</div>' +
+                '<div class="delta ' + deltaClass(delta) + '">' + deltaStr + '</div>' +
+                '</div>';
+        }
+
+        function buildCompareHistTable(data, cap, filter) {
+            var filtered = data;
+            if (filter) {
+                filtered = data.filter(function(d) {
+                    return d.class_name.toLowerCase().indexOf(filter) !== -1;
+                });
+            }
+            var rows = filtered.slice(0, cap);
+            if (rows.length === 0) return '<div style="opacity:0.5; padding:12px;">No matching classes.</div>';
+
+            var html = '<table><thead><tr>';
+            html += '<th>Class</th><th>Change</th>';
+            html += '<th class="right">Instances (\u0394)</th>';
+            html += '<th class="right">Shallow (\u0394)</th>';
+            html += '<th class="right">Retained (\u0394)</th>';
+            html += '<th class="right">Baseline Ret.</th>';
+            html += '<th class="right">Current Ret.</th>';
+            html += '</tr></thead><tbody>';
+
+            rows.forEach(function(d) {
+                html += '<tr>';
+                html += '<td>' + escapeHtml(d.class_name) + '</td>';
+                html += '<td><span class="change-badge ' + d.change_type + '">' + d.change_type + '</span></td>';
+                html += '<td class="right ' + deltaClass(d.instance_count_delta) + '">' + (d.instance_count_delta >= 0 ? '+' : '') + fmtNum(d.instance_count_delta) + '</td>';
+                html += '<td class="right ' + deltaClass(d.shallow_size_delta) + '">' + fmtDelta(d.shallow_size_delta) + '</td>';
+                html += '<td class="right ' + deltaClass(d.retained_size_delta) + '">' + fmtDelta(d.retained_size_delta) + '</td>';
+                html += '<td class="right">' + fmt(d.baseline_retained_size) + '</td>';
+                html += '<td class="right">' + fmt(d.current_retained_size) + '</td>';
+                html += '</tr>';
+            });
+
+            html += '</tbody></table>';
+            if (filtered.length > cap) {
+                html += '<div style="opacity:0.5; padding:8px; font-size:12px;">Showing ' + cap + ' of ' + filtered.length + ' classes</div>';
+            }
+            return html;
+        }
+
+        function renderCompareError(error) {
+            compareBtn.disabled = false;
+            compareStatus.className = 'compare-status error';
+            compareStatus.textContent = 'Error: ' + error;
         }
     })();
     </script>

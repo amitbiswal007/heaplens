@@ -8,7 +8,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use hprof_analyzer::{build_graph, calculate_dominators_with_state, HprofLoader, WasteAnalysis};
+use hprof_analyzer::{build_graph, calculate_dominators_with_state, compare_heaps, HprofLoader, WasteAnalysis};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -329,6 +329,24 @@ fn mcp_tool_definitions() -> serde_json::Value {
                     },
                     "required": ["path", "query"]
                 }
+            },
+            {
+                "name": "compare_heaps",
+                "description": "Compare two previously analyzed heap dumps to see what changed. Shows summary deltas, class histogram changes (grew/shrank/new/removed), leak suspect changes (new/resolved/persisted), and waste deltas. Both files must have been analyzed first.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "current_path": {
+                            "type": "string",
+                            "description": "Absolute path to the current (newer) .hprof file"
+                        },
+                        "baseline_path": {
+                            "type": "string",
+                            "description": "Absolute path to the baseline (older) .hprof file"
+                        }
+                    },
+                    "required": ["current_path", "baseline_path"]
+                }
             }
         ]
     })
@@ -587,6 +605,91 @@ fn format_query_result(result: &hprof_analyzer::heapql::QueryResult) -> String {
     out
 }
 
+/// Formats a signed byte delta with +/- prefix and human-readable units.
+fn fmt_delta_bytes(delta: i64) -> String {
+    let sign = if delta > 0 { "+" } else if delta < 0 { "-" } else { return "0 B".to_string() };
+    let abs = delta.unsigned_abs();
+    format!("{}{}", sign, fmt_bytes(abs))
+}
+
+/// Formats a comparison result as LLM-friendly markdown.
+fn format_comparison_result(result: &hprof_analyzer::HeapComparisonResult) -> String {
+    let mut out = String::new();
+
+    out.push_str("## Heap Comparison\n\n");
+    out.push_str(&format!("- **Baseline:** {}\n", result.baseline_path));
+    out.push_str(&format!("- **Current:** {}\n\n", result.current_path));
+
+    // Summary delta
+    let sd = &result.summary_delta;
+    out.push_str("### Summary Delta\n\n");
+    out.push_str("| Metric | Baseline | Current | Delta |\n");
+    out.push_str("|--------|----------|---------|-------|\n");
+    out.push_str(&format!("| Total Heap | {} | {} | {} |\n",
+        fmt_bytes(sd.baseline_total_heap_size), fmt_bytes(sd.current_total_heap_size),
+        fmt_delta_bytes(sd.total_heap_size_delta)));
+    out.push_str(&format!("| Reachable | {} | {} | {} |\n",
+        fmt_bytes(sd.baseline_reachable_heap_size), fmt_bytes(sd.current_reachable_heap_size),
+        fmt_delta_bytes(sd.reachable_heap_size_delta)));
+    out.push_str(&format!("| Instances | {} | {} | {:+} |\n",
+        sd.baseline_total_instances, sd.current_total_instances, sd.total_instances_delta));
+    out.push_str(&format!("| Classes | {} | {} | {:+} |\n",
+        sd.baseline_total_classes, sd.current_total_classes, sd.total_classes_delta));
+    out.push_str(&format!("| Arrays | {} | {} | {:+} |\n",
+        sd.baseline_total_arrays, sd.current_total_arrays, sd.total_arrays_delta));
+    out.push_str(&format!("| GC Roots | {} | {} | {:+} |\n\n",
+        sd.baseline_total_gc_roots, sd.current_total_gc_roots, sd.total_gc_roots_delta));
+
+    // Top 20 class changes
+    let hist_count = result.histogram_delta.len().min(20);
+    if hist_count > 0 {
+        out.push_str(&format!("### Top {} Class Changes (by retained size delta)\n\n", hist_count));
+        out.push_str("| # | Class | Change | Instances | Retained Delta | Baseline Ret. | Current Ret. |\n");
+        out.push_str("|---|-------|--------|-----------|----------------|---------------|-------------|\n");
+        for (i, d) in result.histogram_delta.iter().take(hist_count).enumerate() {
+            out.push_str(&format!("| {} | {} | {} | {:+} | {} | {} | {} |\n",
+                i + 1, d.class_name, d.change_type, d.instance_count_delta,
+                fmt_delta_bytes(d.retained_size_delta),
+                fmt_bytes(d.baseline_retained_size), fmt_bytes(d.current_retained_size)));
+        }
+        out.push('\n');
+    }
+
+    // Leak suspect changes
+    if !result.leak_suspect_changes.is_empty() {
+        out.push_str("### Leak Suspect Changes\n\n");
+        for lsc in &result.leak_suspect_changes {
+            let icon = match lsc.change_type.as_str() {
+                "new" => "NEW",
+                "resolved" => "RESOLVED",
+                _ => "PERSISTED",
+            };
+            out.push_str(&format!("- **[{}] {}** — {}\n", icon, lsc.class_name, lsc.description));
+            if lsc.change_type == "persisted" {
+                out.push_str(&format!("  Retained: {} -> {} ({})\n",
+                    fmt_bytes(lsc.baseline_retained_size), fmt_bytes(lsc.current_retained_size),
+                    fmt_delta_bytes(lsc.retained_size_delta)));
+            }
+        }
+        out.push('\n');
+    }
+
+    // Waste delta
+    let wd = &result.waste_delta;
+    out.push_str("### Waste Delta\n\n");
+    out.push_str(&format!("- **Total Waste:** {} -> {} ({})\n",
+        fmt_bytes(wd.baseline_total_wasted_bytes), fmt_bytes(wd.current_total_wasted_bytes),
+        fmt_delta_bytes(wd.total_wasted_delta)));
+    out.push_str(&format!("- **Waste %:** {:.1}% -> {:.1}% ({:+.1}pp)\n",
+        wd.baseline_waste_percentage, wd.current_waste_percentage, wd.waste_percentage_delta));
+    out.push_str(&format!("- **Duplicate Strings Delta:** {}\n",
+        fmt_delta_bytes(wd.duplicate_string_wasted_delta)));
+    out.push_str(&format!("- **Empty Collections Delta:** {}\n",
+        fmt_delta_bytes(wd.empty_collection_wasted_delta)));
+
+    out
+}
+
 /// Formats a JSON value for display.
 fn format_json_value(val: &serde_json::Value) -> String {
     match val {
@@ -713,6 +816,26 @@ fn handle_mcp_tool_call(
                 }
                 Err(e) => mcp_text_result(&e, true),
             }
+        }
+        "compare_heaps" => {
+            let current_path = match arguments.get("current_path").and_then(|v| v.as_str()) {
+                Some(p) => p,
+                None => return mcp_text_result("Missing required parameter: current_path", true),
+            };
+            let baseline_path = match arguments.get("baseline_path").and_then(|v| v.as_str()) {
+                Some(p) => p,
+                None => return mcp_text_result("Missing required parameter: baseline_path", true),
+            };
+            let current_state = match get_analysis_state_for_path(analysis_states, current_path) {
+                Ok(s) => s,
+                Err(e) => return mcp_text_result(&format!("Current file: {}", e), true),
+            };
+            let baseline_state = match get_analysis_state_for_path(analysis_states, baseline_path) {
+                Ok(s) => s,
+                Err(e) => return mcp_text_result(&format!("Baseline file: {}", e), true),
+            };
+            let result = compare_heaps(&baseline_state, &current_state, baseline_path, current_path);
+            mcp_text_result(&format_comparison_result(&result), false)
         }
         _ => {
             mcp_text_result(&format!("Unknown tool: {}", tool_name), true)
@@ -939,6 +1062,20 @@ async fn run_jsonrpc_server() -> Result<()> {
                         &analysis_states,
                     ).await {
                         eprintln!("Error handling execute_query request: {}", e);
+                    }
+                } else if request.method == "list_analyzed_files" {
+                    if let Err(e) = handle_list_analyzed_files_request(
+                        request,
+                        &analysis_states,
+                    ).await {
+                        eprintln!("Error handling list_analyzed_files request: {}", e);
+                    }
+                } else if request.method == "compare_heaps" {
+                    if let Err(e) = handle_compare_heaps_request(
+                        request,
+                        &analysis_states,
+                    ).await {
+                        eprintln!("Error handling compare_heaps request: {}", e);
                     }
                 } else {
                     // Unknown method - send error response
@@ -1212,6 +1349,64 @@ async fn handle_execute_query_request(
             }
         }),
     };
+    send_stdout(&response)?;
+
+    Ok(())
+}
+
+/// Handles a list_analyzed_files request.
+async fn handle_list_analyzed_files_request(
+    request: JsonRpcRequest,
+    analysis_states: &Arc<RwLock<HashMap<PathBuf, FileAnalysisState>>>,
+) -> Result<()> {
+    let request_id = request.id.ok_or_else(|| anyhow::anyhow!("Request ID required"))?;
+
+    let states = analysis_states.read()
+        .map_err(|e| anyhow::anyhow!("Failed to read analysis states: {}", e))?;
+
+    let files: Vec<String> = states.keys()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": files
+    });
+    send_stdout(&response)?;
+
+    Ok(())
+}
+
+/// Handles a compare_heaps request.
+async fn handle_compare_heaps_request(
+    request: JsonRpcRequest,
+    analysis_states: &Arc<RwLock<HashMap<PathBuf, FileAnalysisState>>>,
+) -> Result<()> {
+    let params = request.params.ok_or_else(|| anyhow::anyhow!("Missing params"))?;
+    let current_path = params
+        .get("current_path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'current_path' parameter"))?;
+    let baseline_path = params
+        .get("baseline_path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'baseline_path' parameter"))?;
+
+    let request_id = request.id.ok_or_else(|| anyhow::anyhow!("Request ID required"))?;
+
+    let current_state = get_analysis_state_for_path(analysis_states, current_path)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let baseline_state = get_analysis_state_for_path(analysis_states, baseline_path)
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    let result = compare_heaps(&baseline_state, &current_state, baseline_path, current_path);
+
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": result
+    });
     send_stdout(&response)?;
 
     Ok(())

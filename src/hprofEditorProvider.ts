@@ -199,6 +199,40 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                         });
                     }
                     break;
+                case 'listAnalyzedFiles':
+                    try {
+                        const files = await client.sendRequest('list_analyzed_files', {});
+                        const otherFiles = Array.isArray(files) ? files.filter((f: string) => f !== hprofPath) : [];
+                        webviewPanel.webview.postMessage({
+                            command: 'analyzedFiles',
+                            files: otherFiles
+                        });
+                    } catch (error: any) {
+                        this.outputChannel.appendLine(`[HeapLens] listAnalyzedFiles error: ${error.message}`);
+                        webviewPanel.webview.postMessage({
+                            command: 'analyzedFiles',
+                            files: []
+                        });
+                    }
+                    break;
+                case 'compareHeaps':
+                    try {
+                        const compareResult = await client.sendRequest('compare_heaps', {
+                            current_path: hprofPath,
+                            baseline_path: message.baselinePath
+                        });
+                        webviewPanel.webview.postMessage({
+                            command: 'compareResult',
+                            result: compareResult
+                        });
+                    } catch (error: any) {
+                        this.outputChannel.appendLine(`[HeapLens] compareHeaps error: ${error.message}`);
+                        webviewPanel.webview.postMessage({
+                            command: 'compareError',
+                            error: error.message || String(error)
+                        });
+                    }
+                    break;
                 case 'copyReport':
                     this.handleCopyReport(hprofPath, webviewPanel);
                     break;
