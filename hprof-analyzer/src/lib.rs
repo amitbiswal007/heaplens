@@ -13,6 +13,7 @@ use petgraph::algo::dominators;
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Errors that can occur during HPROF file loading and mapping.
@@ -573,6 +574,11 @@ impl HeapGraph {
     /// Returns the heap summary statistics.
     pub fn summary(&self) -> &HeapSummary {
         &self.summary
+    }
+
+    /// Consumes the HeapGraph and returns its parts, avoiding clones.
+    pub fn into_parts(self) -> (Graph<NodeData, (), Directed>, HashMap<u64, NodeIndex>, NodeIndex, HeapSummary) {
+        (self.graph, self.id_to_node, self.super_root, self.summary)
     }
 }
 
@@ -1348,45 +1354,41 @@ pub fn calculate_dominators(graph: &HeapGraph) -> Result<Vec<ObjectReport>> {
         shallow_sizes.insert(node_idx, shallow_size);
     }
 
-    // Step 4: Calculate retained sizes bottom-up
+    // Step 4: Calculate retained sizes via DFS post-order traversal (O(V+E))
     let mut retained_sizes: HashMap<NodeIndex, u64> = HashMap::new();
-    let mut processed = std::collections::HashSet::new();
 
+    // Initialize all retained sizes to shallow sizes
     for node_idx in petgraph.node_indices() {
         let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
         retained_sizes.insert(node_idx, shallow);
     }
 
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for node_idx in petgraph.node_indices() {
-            if processed.contains(&node_idx) {
+    // DFS post-order: process children before parents in a single pass
+    let mut stack: Vec<(NodeIndex, bool)> = vec![(super_root, false)];
+    let mut visited = std::collections::HashSet::new();
+
+    while let Some((node, processed)) = stack.pop() {
+        if processed {
+            // All children are done — accumulate their retained sizes
+            if let Some(node_children) = children.get(&node) {
+                let mut retained = shallow_sizes.get(&node).copied().unwrap_or(0);
+                for &child in node_children {
+                    retained += retained_sizes.get(&child).copied().unwrap_or(0);
+                }
+                retained_sizes.insert(node, retained);
+            }
+        } else {
+            if !visited.insert(node) {
                 continue;
             }
-            let all_children_processed = children
-                .get(&node_idx)
-                .map_or(true, |node_children| {
-                    node_children.iter().all(|&c| processed.contains(&c))
-                });
-            if all_children_processed {
-                let mut retained = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
-                if let Some(node_children) = children.get(&node_idx) {
-                    for &child in node_children {
-                        retained += retained_sizes.get(&child).copied().unwrap_or(0);
+            stack.push((node, true));
+            if let Some(node_children) = children.get(&node) {
+                for &child in node_children {
+                    if !visited.contains(&child) {
+                        stack.push((child, false));
                     }
                 }
-                retained_sizes.insert(node_idx, retained);
-                processed.insert(node_idx);
-                changed = true;
             }
-        }
-    }
-
-    for node_idx in petgraph.node_indices() {
-        if !processed.contains(&node_idx) {
-            let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
-            retained_sizes.insert(node_idx, shallow);
         }
     }
 
@@ -1486,7 +1488,7 @@ pub struct AnalysisState {
     /// The super root node index.
     pub super_root: NodeIndex,
     /// Mapping from node index to (object_id, node_type, class_name).
-    pub node_data_map: HashMap<NodeIndex, (u64, String, String)>,
+    pub node_data_map: HashMap<NodeIndex, (u64, &'static str, Arc<str>)>,
     /// Class histogram entries sorted by retained size.
     pub class_histogram: Vec<ClassHistogramEntry>,
     /// Detected leak suspects.
@@ -1523,9 +1525,10 @@ impl AnalysisState {
         let mut children_reports = Vec::new();
 
         for &child_idx in children_indices {
-            let (child_object_id, node_type, class_name) = self.node_data_map.get(&child_idx)
-                .cloned()
-                .unwrap_or((0, "Unknown".to_string(), String::new()));
+            let (child_object_id, node_type, class_name) = match self.node_data_map.get(&child_idx) {
+                Some(&(id, nt, ref cn)) => (id, nt, cn.clone()),
+                None => (0, "Unknown", Arc::from("")),
+            };
 
             let shallow = self.shallow_sizes.get(&child_idx).copied().unwrap_or(0);
             let retained = self.retained_sizes.get(&child_idx).copied().unwrap_or(0);
@@ -1537,8 +1540,8 @@ impl AnalysisState {
 
             children_reports.push(ObjectReport::new(
                 child_object_id,
-                node_type,
-                class_name,
+                node_type.to_string(),
+                class_name.to_string(),
                 shallow,
                 retained,
                 child_idx,
@@ -1581,9 +1584,9 @@ impl AnalysisState {
 
         while let Some(current) = queue.pop_front() {
             // Check if this is a Root or SuperRoot
-            let (_, node_type, _) = self.node_data_map.get(&current)
-                .cloned()
-                .unwrap_or((0, "Unknown".to_string(), String::new()));
+            let node_type = self.node_data_map.get(&current)
+                .map(|&(_, nt, _)| nt)
+                .unwrap_or("Unknown");
 
             if node_type == "Root" || node_type == "SuperRoot" {
                 found_root = Some(current);
@@ -1621,12 +1624,13 @@ impl AnalysisState {
         let mut path = Vec::new();
         let mut current = root_idx;
         loop {
-            let (obj_id, node_type, class_name) = self.node_data_map.get(&current)
-                .cloned()
-                .unwrap_or((0, "Unknown".to_string(), String::new()));
+            let (obj_id, node_type, class_name) = match self.node_data_map.get(&current) {
+                Some(&(id, nt, ref cn)) => (id, nt, cn.to_string()),
+                None => (0, "Unknown", String::new()),
+            };
             let shallow = self.shallow_sizes.get(&current).copied().unwrap_or(0);
             let retained = self.retained_sizes.get(&current).copied().unwrap_or(0);
-            path.push(ObjectReport::new(obj_id, node_type, class_name, shallow, retained, current));
+            path.push(ObjectReport::new(obj_id, node_type.to_string(), class_name, shallow, retained, current));
 
             if current == target_idx {
                 break;
@@ -1671,9 +1675,10 @@ impl AnalysisState {
                 break;
             }
 
-            let (object_id, node_type, class_name) = self.node_data_map.get(&node_idx)
-                .cloned()
-                .unwrap_or((0, "Unknown".to_string(), String::new()));
+            let (object_id, node_type, class_name) = match self.node_data_map.get(&node_idx) {
+                Some(&(id, nt, ref cn)) => (id, nt, cn.to_string()),
+                None => (0, "Unknown", String::new()),
+            };
 
             let shallow = self.shallow_sizes.get(&node_idx).copied().unwrap_or(0);
             let retained = self.retained_sizes.get(&node_idx).copied().unwrap_or(0);
@@ -1694,7 +1699,7 @@ impl AnalysisState {
 
             result.push(ObjectReport::new(
                 object_id,
-                node_type,
+                node_type.to_string(),
                 class_name,
                 shallow,
                 retained,
@@ -1722,14 +1727,13 @@ impl AnalysisState {
 ///
 /// This is similar to `calculate_dominators` but also returns the analysis state
 /// needed for lazy loading queries, plus class histogram and leak suspects.
-pub fn calculate_dominators_with_state(graph: &HeapGraph) -> Result<(Vec<ObjectReport>, AnalysisState)> {
+pub fn calculate_dominators_with_state(graph: HeapGraph) -> Result<(Vec<ObjectReport>, AnalysisState)> {
     log::debug!("Calculating dominators with state for {} nodes", graph.node_count());
 
-    let petgraph = graph.graph();
-    let super_root = graph.super_root();
+    let (petgraph, id_to_node, super_root, summary) = graph.into_parts();
 
     // Step 1: Compute dominator tree
-    let dominators = dominators::simple_fast(petgraph, super_root);
+    let dominators = dominators::simple_fast(&petgraph, super_root);
     log::info!("Dominator tree computed successfully");
 
     // Step 1b: Build reverse reference adjacency list from original graph edges
@@ -1769,52 +1773,51 @@ pub fn calculate_dominators_with_state(graph: &HeapGraph) -> Result<(Vec<ObjectR
         shallow_sizes.insert(node_idx, shallow_size);
     }
 
-    // Step 4: Calculate retained sizes bottom-up
+    // Step 4: Calculate retained sizes via DFS post-order traversal (O(V+E))
     let mut retained_sizes: HashMap<NodeIndex, u64> = HashMap::new();
-    let mut processed = std::collections::HashSet::new();
 
+    // Initialize all retained sizes to shallow sizes
     for node_idx in petgraph.node_indices() {
         let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
         retained_sizes.insert(node_idx, shallow);
     }
 
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for node_idx in petgraph.node_indices() {
-            if processed.contains(&node_idx) {
+    // DFS post-order: process children before parents in a single pass
+    let mut stack: Vec<(NodeIndex, bool)> = vec![(super_root, false)];
+    let mut visited = std::collections::HashSet::new();
+
+    while let Some((node, processed)) = stack.pop() {
+        if processed {
+            // All children are done — accumulate their retained sizes
+            if let Some(node_children) = children_map.get(&node) {
+                let mut retained = shallow_sizes.get(&node).copied().unwrap_or(0);
+                for &child in node_children {
+                    retained += retained_sizes.get(&child).copied().unwrap_or(0);
+                }
+                retained_sizes.insert(node, retained);
+            }
+        } else {
+            if !visited.insert(node) {
                 continue;
             }
-            let all_children_processed = children_map
-                .get(&node_idx)
-                .map_or(true, |node_children| {
-                    node_children.iter().all(|&c| processed.contains(&c))
-                });
-            if all_children_processed {
-                let mut retained = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
-                if let Some(node_children) = children_map.get(&node_idx) {
-                    for &child in node_children {
-                        retained += retained_sizes.get(&child).copied().unwrap_or(0);
+            stack.push((node, true));
+            if let Some(node_children) = children_map.get(&node) {
+                for &child in node_children {
+                    if !visited.contains(&child) {
+                        stack.push((child, false));
                     }
                 }
-                retained_sizes.insert(node_idx, retained);
-                processed.insert(node_idx);
-                changed = true;
             }
-        }
-    }
-
-    for node_idx in petgraph.node_indices() {
-        if !processed.contains(&node_idx) {
-            let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
-            retained_sizes.insert(node_idx, shallow);
         }
     }
 
     log::info!("Calculated retained sizes for {} nodes", retained_sizes.len());
 
     // Step 5: Build node_data_map and ObjectReports
-    let mut node_data_map: HashMap<NodeIndex, (u64, String, String)> = HashMap::new();
+    // Use string interning for class names to reduce heap allocations
+    let mut class_name_intern: HashMap<String, Arc<str>> = HashMap::new();
+    let empty_class: Arc<str> = Arc::from("");
+    let mut node_data_map: HashMap<NodeIndex, (u64, &'static str, Arc<str>)> = HashMap::new();
     let mut reports: Vec<ObjectReport> = Vec::new();
 
     for node_idx in petgraph.node_indices() {
@@ -1822,20 +1825,30 @@ pub fn calculate_dominators_with_state(graph: &HeapGraph) -> Result<(Vec<ObjectR
         let shallow = shallow_sizes.get(&node_idx).copied().unwrap_or(0);
         let retained = retained_sizes.get(&node_idx).copied().unwrap_or(0);
 
-        let (object_id, node_type, class_name) = match node_data {
-            NodeData::SuperRoot => (0, "SuperRoot".to_string(), String::new()),
-            NodeData::Root => (0, "Root".to_string(), String::new()),
-            NodeData::Class => (0, "Class".to_string(), String::new()),
-            NodeData::Instance { id, class_name, .. } => (*id, "Instance".to_string(), class_name.clone()),
-            NodeData::Array { id, class_name, .. } => (*id, "Array".to_string(), class_name.clone()),
+        let (object_id, node_type, class_name_arc): (u64, &'static str, Arc<str>) = match node_data {
+            NodeData::SuperRoot => (0, "SuperRoot", empty_class.clone()),
+            NodeData::Root => (0, "Root", empty_class.clone()),
+            NodeData::Class => (0, "Class", empty_class.clone()),
+            NodeData::Instance { id, class_name, .. } => {
+                let interned = class_name_intern.entry(class_name.clone())
+                    .or_insert_with(|| Arc::from(class_name.as_str()))
+                    .clone();
+                (*id, "Instance", interned)
+            }
+            NodeData::Array { id, class_name, .. } => {
+                let interned = class_name_intern.entry(class_name.clone())
+                    .or_insert_with(|| Arc::from(class_name.as_str()))
+                    .clone();
+                (*id, "Array", interned)
+            }
         };
 
-        node_data_map.insert(node_idx, (object_id, node_type.clone(), class_name.clone()));
+        node_data_map.insert(node_idx, (object_id, node_type, class_name_arc.clone()));
 
         reports.push(ObjectReport::new(
             object_id,
-            node_type,
-            class_name,
+            node_type.to_string(),
+            class_name_arc.to_string(),
             shallow,
             retained,
             node_idx,
@@ -1874,7 +1887,6 @@ pub fn calculate_dominators_with_state(graph: &HeapGraph) -> Result<(Vec<ObjectR
     // Step 7: Detect leak suspects
     // Use total_heap_size from summary (sum of all shallow sizes) as the denominator
     // for percentages, since it's always correct regardless of dominator tree coverage.
-    let summary = graph.summary();
     let total_heap_size = summary.total_heap_size;
     let mut leak_suspects = Vec::new();
 
@@ -1885,10 +1897,11 @@ pub fn calculate_dominators_with_state(graph: &HeapGraph) -> Result<(Vec<ObjectR
                 let retained = retained_sizes.get(&child_idx).copied().unwrap_or(0);
                 let percentage = (retained as f64 / total_heap_size as f64) * 100.0;
                 if percentage > 10.0 {
-                    let (object_id, _, class_name) = node_data_map.get(&child_idx)
-                        .cloned()
-                        .unwrap_or((0, String::new(), String::new()));
-                    let display_name = if class_name.is_empty() { "Unknown".to_string() } else { class_name.clone() };
+                    let (object_id, class_name) = match node_data_map.get(&child_idx) {
+                        Some(&(id, _, ref cn)) => (id, cn.to_string()),
+                        None => (0, String::new()),
+                    };
+                    let display_name = if class_name.is_empty() { "Unknown".to_string() } else { class_name };
                     leak_suspects.push(LeakSuspect {
                         class_name: display_name.clone(),
                         object_id,
@@ -1934,15 +1947,12 @@ pub fn calculate_dominators_with_state(graph: &HeapGraph) -> Result<(Vec<ObjectR
     }
     log::info!("Detected {} leak suspects", leak_suspects.len());
 
-    let id_to_node = graph.id_to_node().clone();
-    let summary = graph.summary().clone();
-
     let state = AnalysisState {
         children_map,
         retained_sizes,
         shallow_sizes,
         id_to_node,
-        super_root: graph.super_root(),
+        super_root,
         node_data_map,
         class_histogram,
         leak_suspects,
@@ -2095,13 +2105,13 @@ mod tests {
     /// Helper to build a minimal AnalysisState for GC root path testing.
     fn make_test_state(
         edges: &[(NodeIndex, NodeIndex)],
-        node_data: &[(NodeIndex, u64, &str, &str)], // (idx, object_id, node_type, class_name)
+        node_data: &[(NodeIndex, u64, &'static str, &str)], // (idx, object_id, node_type, class_name)
         super_root: NodeIndex,
     ) -> AnalysisState {
         let mut reverse_refs: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
         let mut children_map: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
         let mut id_to_node: HashMap<u64, NodeIndex> = HashMap::new();
-        let mut node_data_map: HashMap<NodeIndex, (u64, String, String)> = HashMap::new();
+        let mut node_data_map: HashMap<NodeIndex, (u64, &'static str, Arc<str>)> = HashMap::new();
         let mut shallow_sizes: HashMap<NodeIndex, u64> = HashMap::new();
         let mut retained_sizes: HashMap<NodeIndex, u64> = HashMap::new();
 
@@ -2111,7 +2121,7 @@ mod tests {
         }
 
         for &(idx, object_id, node_type, class_name) in node_data {
-            node_data_map.insert(idx, (object_id, node_type.to_string(), class_name.to_string()));
+            node_data_map.insert(idx, (object_id, node_type, Arc::from(class_name)));
             if object_id > 0 {
                 id_to_node.insert(object_id, idx);
             }

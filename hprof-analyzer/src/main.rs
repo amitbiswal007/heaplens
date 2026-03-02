@@ -69,8 +69,8 @@ struct AnalyzeHeapResult {
 /// Analysis state stored per file path.
 #[derive(Clone)]
 struct FileAnalysisState {
-    /// The analysis state for querying children.
-    state: Arc<RwLock<Option<hprof_analyzer::AnalysisState>>>,
+    /// The analysis state for querying children (Arc-wrapped for cheap cloning).
+    state: Arc<RwLock<Option<Arc<hprof_analyzer::AnalysisState>>>>,
     /// The file path this analysis is for.
     #[allow(dead_code)]
     path: PathBuf,
@@ -129,7 +129,7 @@ fn analyze_heap_blocking(
 fn analyze_heap_internal(
     path: &PathBuf,
     analysis_states: Arc<RwLock<HashMap<PathBuf, FileAnalysisState>>>,
-) -> Result<(Vec<hprof_analyzer::ObjectReport>, hprof_analyzer::AnalysisState)> {
+) -> Result<(Vec<hprof_analyzer::ObjectReport>, Arc<hprof_analyzer::AnalysisState>)> {
     // Step 1: Load and map the HPROF file
     eprintln!("[Progress] Step 1/3: Loading HPROF file...");
     let loader = HprofLoader::new(path.clone());
@@ -154,11 +154,14 @@ fn analyze_heap_internal(
 
     // Step 3: Calculate dominators and retained sizes with state
     eprintln!("[Progress] Step 3/3: Calculating dominators and retained sizes...");
-    let (top_objects, analysis_state) = calculate_dominators_with_state(&graph)
+    let (top_objects, analysis_state) = calculate_dominators_with_state(graph)
         .context("Failed to calculate dominators")?;
 
     eprintln!("[Progress] Analysis complete: {} top objects", top_objects.len());
     log::info!("Analysis complete: {} top objects", top_objects.len());
+
+    // Wrap in Arc for cheap cloning on queries
+    let analysis_state = Arc::new(analysis_state);
 
     // Step 4: Store analysis state for lazy loading queries
     {
@@ -296,10 +299,11 @@ fn mcp_tool_definitions() -> serde_json::Value {
 }
 
 /// Gets the analysis state for a file path, returning an error text if not found.
+/// Returns an Arc<AnalysisState> — cloning the Arc is a single atomic increment.
 fn get_analysis_state_for_path(
     analysis_states: &Arc<RwLock<HashMap<PathBuf, FileAnalysisState>>>,
     path: &str,
-) -> std::result::Result<hprof_analyzer::AnalysisState, String> {
+) -> std::result::Result<Arc<hprof_analyzer::AnalysisState>, String> {
     let states = analysis_states.read()
         .map_err(|e| format!("Internal error: {}", e))?;
     let file_state = states.get(&PathBuf::from(path))
