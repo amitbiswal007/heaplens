@@ -918,13 +918,15 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
             let own_fields = class_field_info.get(&cid)
                 .map(|info| &info.own_fields[..])
                 .unwrap_or(&[]);
+            // HPROF stores instance fields in superclass-first order:
+            // [Object fields...][Parent fields...][Own fields]
             let mut layout = Vec::with_capacity(
                 own_fields.len() + parent_layout.map_or(0, |p| p.len())
             );
-            layout.extend_from_slice(own_fields);
             if let Some(parent) = parent_layout {
                 layout.extend_from_slice(parent);
             }
+            layout.extend_from_slice(own_fields);
             class_field_layouts.insert(cid, layout);
         }
     }
@@ -2453,12 +2455,23 @@ impl AnalysisState {
                 continue;
             }
 
-            // Look up the edge label from parent→child in reverse_refs
+            // Look up the edge label from parent→child in reverse_refs.
+            // First try the dominator parent (node_idx → child_idx direct edge).
+            // If none, fall back to any referrer with a named edge, since the
+            // dominator parent may not have a direct reference (e.g., dominated
+            // through an intermediate array or wrapper).
             let field_name = self.reverse_refs.get(&child_idx)
                 .and_then(|refs| {
+                    // Prefer direct edge from dominator parent
                     refs.iter()
                         .find(|(src, _)| *src == node_idx)
                         .and_then(|(_, label)| self.resolve_edge_label(label))
+                        .or_else(|| {
+                            // Fallback: first referrer with a meaningful label
+                            refs.iter()
+                                .filter_map(|(_, label)| self.resolve_edge_label(label))
+                                .next()
+                        })
                 });
 
             let mut report = ObjectReport::new(
