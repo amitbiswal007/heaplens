@@ -943,7 +943,7 @@ impl AnalysisState {
                 let referrers = self.reverse_refs.get(node_idx)
                     .map(|refs| {
                         refs.iter()
-                            .filter_map(|&idx| self.node_to_report(idx))
+                            .filter_map(|&(idx, _)| self.node_to_report(idx))
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
@@ -1041,7 +1041,7 @@ fn reports_to_result(reports: Vec<ObjectReport>, start: Instant) -> QueryResult 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ClassHistogramEntry, LeakSuspect, HeapSummary, WasteAnalysis};
+    use crate::{ClassHistogramEntry, EdgeLabel, LeakSuspect, HeapSummary, WasteAnalysis};
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -1076,11 +1076,11 @@ mod tests {
         // ArrayList -> byte[]
         children_map.insert(NodeIndex::new(3), vec![NodeIndex::new(4)]);
 
-        let mut reverse_refs: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
-        reverse_refs.insert(NodeIndex::new(2), vec![NodeIndex::new(1)]);
-        reverse_refs.insert(NodeIndex::new(3), vec![NodeIndex::new(2)]);
-        reverse_refs.insert(NodeIndex::new(4), vec![NodeIndex::new(3)]);
-        reverse_refs.insert(NodeIndex::new(5), vec![NodeIndex::new(1)]);
+        let mut reverse_refs: HashMap<NodeIndex, Vec<(NodeIndex, EdgeLabel)>> = HashMap::new();
+        reverse_refs.insert(NodeIndex::new(2), vec![(NodeIndex::new(1), EdgeLabel::Unknown)]);
+        reverse_refs.insert(NodeIndex::new(3), vec![(NodeIndex::new(2), EdgeLabel::Unknown)]);
+        reverse_refs.insert(NodeIndex::new(4), vec![(NodeIndex::new(3), EdgeLabel::Unknown)]);
+        reverse_refs.insert(NodeIndex::new(5), vec![(NodeIndex::new(1), EdgeLabel::Unknown)]);
 
         let class_histogram = vec![
             ClassHistogramEntry {
@@ -1141,6 +1141,9 @@ mod tests {
                 duplicate_strings: vec![],
                 empty_collections: vec![],
             },
+            field_name_table: vec![],
+            class_field_layouts: std::collections::HashMap::new(),
+            id_size: jvm_hprof::IdSize::U64,
         }
     }
 

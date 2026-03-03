@@ -178,6 +178,27 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                         });
                     }
                     break;
+                case 'inspectObject':
+                    this.outputChannel.appendLine(`[HeapLens] inspectObject request for objectId: ${message.objectId}`);
+                    try {
+                        const fields = await client.sendRequest('inspect_object', {
+                            path: hprofPath,
+                            object_id: message.objectId
+                        });
+                        webviewPanel.webview.postMessage({
+                            command: 'inspectObjectResponse',
+                            objectId: message.objectId,
+                            fields: fields
+                        });
+                    } catch (error: any) {
+                        this.outputChannel.appendLine(`[HeapLens] inspectObject error: ${error.message}`);
+                        webviewPanel.webview.postMessage({
+                            command: 'inspectObjectResponse',
+                            objectId: message.objectId,
+                            fields: null
+                        });
+                    }
+                    break;
                 case 'executeQuery':
                     this.outputChannel.appendLine(`[HeapLens] executeQuery: ${message.query}`);
                     try {
@@ -493,6 +514,24 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                 lines.push(`  ${s.description}`);
             });
             lines.push('');
+        }
+
+        // Top Retained Objects
+        if (data.topObjects && data.topObjects.length > 0) {
+            const topFiltered = data.topObjects
+                .filter((o: any) => o.retained_size > 0 && o.node_type !== 'Class' && o.node_type !== 'SuperRoot')
+                .slice(0, 10);
+            if (topFiltered.length > 0) {
+                lines.push('## Top Retained Objects');
+                lines.push('');
+                lines.push('| Object | Shallow | Retained |');
+                lines.push('|--------|---------|----------|');
+                topFiltered.forEach((o: any) => {
+                    const name = o.field_name ? `${o.field_name} = ${o.class_name}` : o.class_name;
+                    lines.push(`| ${name} | ${this.fmtBytes(o.shallow_size)} | ${this.fmtBytes(o.retained_size)} |`);
+                });
+                lines.push('');
+            }
         }
 
         // Top 10 classes

@@ -20,6 +20,7 @@ export interface AnalysisData {
         class_name: string;
         shallow_size: number;
         retained_size: number;
+        field_name?: string;
     }>;
     leakSuspects: Array<{
         class_name: string;
@@ -95,7 +96,7 @@ export function formatAnalysisContext(data: AnalysisData): string {
         parts.push('| # | Class | Type | Shallow | Retained |');
         parts.push('|---|-------|------|---------|----------|');
         filtered.forEach((o, i) => {
-            const name = o.class_name || o.node_type;
+            const name = o.field_name ? `${o.field_name} = ${o.class_name || o.node_type}` : (o.class_name || o.node_type);
             parts.push(`| ${i + 1} | ${name} | ${o.node_type} | ${fmtBytes(o.shallow_size)} | ${fmtBytes(o.retained_size)} |`);
         });
         parts.push('');

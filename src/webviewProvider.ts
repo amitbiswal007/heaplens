@@ -483,6 +483,85 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         }
         .tree-row:hover .tree-pin { opacity: 0.6; }
         .tree-pin:hover { opacity: 1 !important; }
+        .tree-field-name {
+            color: var(--vscode-textLink-foreground, #3794ff);
+            margin-right: 4px;
+            font-weight: 500;
+        }
+        .tree-inspect {
+            margin-left: 6px;
+            flex-shrink: 0;
+            cursor: pointer;
+            opacity: 0;
+            font-size: 12px;
+            transition: opacity 0.15s;
+        }
+        .tree-row:hover .tree-inspect { opacity: 0.6; }
+        .tree-inspect:hover { opacity: 1 !important; }
+        .gc-path-field {
+            font-style: italic;
+            opacity: 0.7;
+            font-size: 11px;
+            margin: 0 2px;
+        }
+        /* Inspector panel */
+        .inspector-panel {
+            position: fixed;
+            top: 0;
+            right: 0;
+            width: 380px;
+            height: 100%;
+            background: var(--vscode-editor-background);
+            border-left: 2px solid var(--vscode-panel-border);
+            overflow-y: auto;
+            z-index: 1000;
+            display: none;
+            box-shadow: -2px 0 8px rgba(0,0,0,0.2);
+        }
+        .inspector-panel.visible { display: block; }
+        .inspector-header {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--vscode-panel-border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            background: var(--vscode-editor-background);
+            z-index: 1;
+        }
+        .inspector-header h3 { margin: 0; font-size: 13px; }
+        .inspector-close {
+            background: none;
+            border: none;
+            color: var(--vscode-foreground);
+            font-size: 18px;
+            cursor: pointer;
+            opacity: 0.6;
+            padding: 0 4px;
+        }
+        .inspector-close:hover { opacity: 1; }
+        .inspector-body { padding: 8px 0; }
+        .inspector-field {
+            display: flex;
+            align-items: baseline;
+            padding: 5px 16px;
+            border-bottom: 1px solid var(--vscode-panel-border);
+            font-size: 12px;
+            gap: 8px;
+        }
+        .inspector-field:hover { background: var(--vscode-list-hoverBackground); }
+        .inspector-field-name { font-weight: 600; min-width: 100px; flex-shrink: 0; }
+        .inspector-field-type { opacity: 0.5; min-width: 50px; flex-shrink: 0; }
+        .inspector-field-value { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .inspector-ref-link {
+            color: var(--vscode-textLink-foreground, #3794ff);
+            cursor: pointer;
+            text-decoration: none;
+        }
+        .inspector-ref-link:hover { text-decoration: underline; }
+        .inspector-sizes { opacity: 0.5; font-size: 11px; flex-shrink: 0; }
+        .inspector-loading { padding: 20px; text-align: center; opacity: 0.5; }
 
         /* Auto-Diagnosis cards */
         .diagnosis-section { margin-bottom: 20px; }
@@ -843,6 +922,7 @@ export function getWebviewContent(_webview: vscode.Webview): string {
     </div>
 
     <div id="gc-path-container"></div>
+    <div id="inspector-panel" class="inspector-panel"></div>
     <div class="source-toast" id="source-toast"></div>
 
     <script src="${d3Uri}"></script>
@@ -909,6 +989,9 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     break;
                 case 'gcRootPathResponse':
                     renderGcRootPath(msg.path);
+                    break;
+                case 'inspectObjectResponse':
+                    renderInspectorFields(msg.objectId, msg.fields);
                     break;
                 case 'reportCopied':
                     showReportCopied();
@@ -1197,9 +1280,12 @@ export function getWebviewContent(_webview: vscode.Webview): string {
             const depBadge = cachedDep ? makeBadgeHtml(cachedDep.tier, cachedDep.dependency) : '';
 
             const showPin = obj.object_id > 0;
+            const showInspect = obj.node_type === 'Instance' && obj.object_id > 0;
+            const fieldNameHtml = obj.field_name ? '<span class="tree-field-name">' + escapeHtml(obj.field_name) + ' =</span>' : '';
 
             row.innerHTML =
                 '<span class="tree-toggle">' + (leaf ? '' : '▶') + '</span>' +
+                fieldNameHtml +
                 '<span class="tree-name">' + escapeHtml(displayName) + '</span>' +
                 '<span class="tree-type ' + typeCls + '">' + obj.node_type + '</span>' +
                 '<span class="tree-shallow">' + fmt(obj.shallow_size) + '</span>' +
@@ -1207,6 +1293,7 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                 '<span class="tree-bar-wrap"><div class="tree-bar" style="width:' + barWidth + '%"></div></span>' +
                 '<span class="tree-pct">' + pctStr + '%</span>' +
                 (showPin ? '<span class="tree-pin" title="Show GC root path">&#x1F4CD;</span>' : '') +
+                (showInspect ? '<span class="tree-inspect" title="Inspect fields">&#x1F50D;</span>' : '') +
                 (showSource ? '<span class="tree-source" title="Go to source">&#8599;</span>' : '') +
                 depBadge;
 
@@ -1229,6 +1316,13 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                 row.querySelector('.tree-pin').addEventListener('click', (e) => {
                     e.stopPropagation();
                     vscode.postMessage({ command: 'gcRootPath', objectId: obj.object_id });
+                });
+            }
+
+            if (showInspect) {
+                row.querySelector('.tree-inspect').addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    openInspector(obj.object_id, displayName, obj.shallow_size, obj.retained_size);
                 });
             }
 
@@ -1619,12 +1713,84 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                 const cls = isRoot ? 'root' : isTarget ? 'target' : '';
                 const label = node.class_name || node.node_type;
                 const title = label + ' (' + fmt(node.retained_size) + ')';
-                if (i > 0) html += '<span class="gc-path-arrow">&#9654;</span>';
+                if (i > 0) {
+                    if (node.field_name) {
+                        html += '<span class="gc-path-arrow">&#9654;</span><span class="gc-path-field">(' + escapeHtml(node.field_name) + ')</span>';
+                    } else {
+                        html += '<span class="gc-path-arrow">&#9654;</span>';
+                    }
+                }
                 html += '<span class="gc-path-node ' + cls + '" title="' + escapeHtml(title) + '">' + escapeHtml(label) + '</span>';
             });
             html += '<button class="gc-path-close">&times;</button></div>';
             container.innerHTML = html;
             container.querySelector('.gc-path-close').addEventListener('click', closeGcPath);
+        }
+
+        // ---- Object Inspector ----
+        function openInspector(objectId, className, shallowSize, retainedSize) {
+            const panel = document.getElementById('inspector-panel');
+            panel.innerHTML = '<div class="inspector-header"><h3>' + escapeHtml(className) + '</h3><button class="inspector-close">&times;</button></div>' +
+                '<div style="padding:8px 16px;font-size:11px;opacity:0.6;">Shallow: ' + fmt(shallowSize) + ' | Retained: ' + fmt(retainedSize) + '</div>' +
+                '<div class="inspector-loading">Loading fields...</div>';
+            panel.classList.add('visible');
+            panel.querySelector('.inspector-close').addEventListener('click', closeInspector);
+            vscode.postMessage({ command: 'inspectObject', objectId: objectId });
+        }
+
+        function closeInspector() {
+            const panel = document.getElementById('inspector-panel');
+            panel.classList.remove('visible');
+            panel.innerHTML = '';
+        }
+
+        function renderInspectorFields(objectId, fields) {
+            const panel = document.getElementById('inspector-panel');
+            if (!panel.classList.contains('visible')) return;
+
+            const body = panel.querySelector('.inspector-loading');
+            if (!body) return;
+
+            if (!fields || fields.length === 0) {
+                body.innerHTML = '<div style="padding:20px;text-align:center;opacity:0.5;">No fields found</div>';
+                body.className = 'inspector-body';
+                return;
+            }
+
+            let html = '';
+            fields.forEach(function(f) {
+                let valueHtml = '';
+                if (f.primitive_value !== undefined && f.primitive_value !== null) {
+                    valueHtml = '<span class="inspector-field-value">' + escapeHtml(String(f.primitive_value)) + '</span>';
+                } else if (f.ref_object_id) {
+                    const refLabel = f.ref_summary ? f.ref_summary.class_name : '0x' + f.ref_object_id.toString(16);
+                    valueHtml = '<span class="inspector-field-value"><span class="inspector-ref-link" data-ref-id="' + f.ref_object_id + '" data-ref-class="' + escapeHtml(refLabel) + '">' + escapeHtml(refLabel) + '</span></span>';
+                    if (f.ref_summary) {
+                        valueHtml += '<span class="inspector-sizes">' + fmt(f.ref_summary.retained_size) + '</span>';
+                    }
+                } else {
+                    valueHtml = '<span class="inspector-field-value" style="opacity:0.4">—</span>';
+                }
+                html += '<div class="inspector-field">' +
+                    '<span class="inspector-field-name">' + escapeHtml(f.name) + '</span>' +
+                    '<span class="inspector-field-type">' + escapeHtml(f.field_type) + '</span>' +
+                    valueHtml +
+                    '</div>';
+            });
+
+            body.className = 'inspector-body';
+            body.innerHTML = html;
+
+            // Attach click handlers for reference links
+            body.querySelectorAll('.inspector-ref-link').forEach(function(link) {
+                link.addEventListener('click', function() {
+                    const refId = parseInt(link.dataset.refId);
+                    const refClass = link.dataset.refClass || '';
+                    if (refId > 0) {
+                        openInspector(refId, refClass, 0, 0);
+                    }
+                });
+            });
         }
 
         // ---- Incident Report ----

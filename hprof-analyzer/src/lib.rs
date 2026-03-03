@@ -499,6 +499,52 @@ pub enum NodeData {
     },
 }
 
+/// Label on a graph edge describing the kind of reference.
+///
+/// Each variant carries a compact payload to minimise per-edge memory:
+/// - `InstanceField(u32)` / `StaticField(u32)` — index into `HeapGraph::field_name_table`
+/// - `ArrayElement` — element of an object array (no specific index stored)
+/// - `SuperClass` / `ClassLoader` / `GcRoot` / `Unknown` — structural edges
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum EdgeLabel {
+    /// Reference through an instance field. The u32 is an index into `field_name_table`.
+    InstanceField(u32),
+    /// Reference through a static field. The u32 is an index into `field_name_table`.
+    StaticField(u32),
+    /// Element of an object array.
+    ArrayElement,
+    /// Class → superclass edge.
+    SuperClass,
+    /// Class → class-loader edge.
+    ClassLoader,
+    /// SuperRoot → GC root edge.
+    GcRoot,
+    /// Fallback extraction (no field type info available).
+    Unknown,
+}
+
+/// Summary of a referenced object for field inspection.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RefSummary {
+    pub class_name: String,
+    pub node_type: String,
+    pub shallow_size: u64,
+    pub retained_size: u64,
+}
+
+/// Information about a single field of an inspected object.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FieldInfo {
+    pub name: String,
+    pub field_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primitive_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ref_object_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ref_summary: Option<RefSummary>,
+}
+
 /// A graph representation of the Java heap.
 ///
 /// This graph models the object reference relationships in a heap dump:
@@ -535,7 +581,7 @@ pub enum NodeData {
 #[derive(Debug)]
 pub struct HeapGraph {
     /// The underlying petgraph graph structure.
-    graph: Graph<NodeData, (), Directed>,
+    graph: Graph<NodeData, EdgeLabel, Directed>,
     /// Mapping from HPROF object/class IDs to graph node indices.
     id_to_node: HashMap<u64, NodeIndex>,
     /// The node index of the synthetic SuperRoot node.
@@ -544,16 +590,22 @@ pub struct HeapGraph {
     summary: HeapSummary,
     /// Set of object IDs that are classloader instances (for leak detection).
     classloader_ids: std::collections::HashSet<u64>,
+    /// Interned field name strings indexed by u32 for compact EdgeLabel storage.
+    field_name_table: Vec<Arc<str>>,
+    /// Per-class field layouts for object inspection (class_obj_id → named field list).
+    class_field_layouts: HashMap<u64, Vec<(Arc<str>, jvm_hprof::heap_dump::FieldType)>>,
+    /// HPROF identifier size (4 or 8 bytes).
+    id_size: IdSize,
 }
 
 impl HeapGraph {
     /// Returns a reference to the underlying graph.
-    pub fn graph(&self) -> &Graph<NodeData, (), Directed> {
+    pub fn graph(&self) -> &Graph<NodeData, EdgeLabel, Directed> {
         &self.graph
     }
 
     /// Returns a mutable reference to the underlying graph.
-    pub fn graph_mut(&mut self) -> &mut Graph<NodeData, (), Directed> {
+    pub fn graph_mut(&mut self) -> &mut Graph<NodeData, EdgeLabel, Directed> {
         &mut self.graph
     }
 
@@ -590,17 +642,23 @@ impl HeapGraph {
             super_root: self.super_root,
             summary: self.summary,
             classloader_ids: self.classloader_ids,
+            field_name_table: self.field_name_table,
+            class_field_layouts: self.class_field_layouts,
+            id_size: self.id_size,
         }
     }
 }
 
 /// Parts of a HeapGraph after consumption, used by dominator analysis.
 pub struct HeapGraphParts {
-    pub graph: Graph<NodeData, (), Directed>,
+    pub graph: Graph<NodeData, EdgeLabel, Directed>,
     pub id_to_node: HashMap<u64, NodeIndex>,
     pub super_root: NodeIndex,
     pub summary: HeapSummary,
     pub classloader_ids: std::collections::HashSet<u64>,
+    pub field_name_table: Vec<Arc<str>>,
+    pub class_field_layouts: HashMap<u64, Vec<(Arc<str>, jvm_hprof::heap_dump::FieldType)>>,
+    pub id_size: IdSize,
 }
 
 /// Builds a graph representation of the Java heap from HPROF file data.
@@ -668,8 +726,21 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
     let id_size = hprof.header().id_size();
     // Estimate node count from file size: ~100 bytes per object on average
     let estimated_nodes = (data.len() / 100).max(1024);
-    let mut graph = Graph::<NodeData, (), Directed>::with_capacity(estimated_nodes, estimated_nodes * 2);
+    let mut graph = Graph::<NodeData, EdgeLabel, Directed>::with_capacity(estimated_nodes, estimated_nodes * 2);
     let mut id_to_node: HashMap<u64, NodeIndex> = HashMap::with_capacity(estimated_nodes);
+    let mut field_name_table: Vec<Arc<str>> = Vec::new();
+    let mut field_name_index: HashMap<Arc<str>, u32> = HashMap::new();
+
+    // Helper closure to intern field names into the table
+    let mut intern_field_name = |name: &Arc<str>| -> u32 {
+        if let Some(&idx) = field_name_index.get(name) {
+            return idx;
+        }
+        let idx = field_name_table.len() as u32;
+        field_name_table.push(name.clone());
+        field_name_index.insert(name.clone(), idx);
+        idx
+    };
 
     let super_root = graph.add_node(NodeData::SuperRoot);
 
@@ -722,7 +793,9 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
         }
     }
     log::info!("Built class name map: {} entries, {} class nodes", class_name_map.len(), class_count);
-    drop(string_table); // Free string table memory — no longer needed
+    // NOTE: string_table is kept alive until after Pass 2 so field names
+    // can be resolved during Pass 1 (instance field descriptors) and
+    // Pass 2 (static field names).  Memory impact: ~5-20 MB longer.
     let num_classes = load_class_entries.len();
     drop(load_class_entries);
 
@@ -744,9 +817,11 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
     // Collect field descriptors and superclass info for typed reference extraction
     struct ClassFieldInfo {
         super_class_id: Option<u64>,
-        own_field_types: Vec<jvm_hprof::heap_dump::FieldType>,
+        own_fields: Vec<(Arc<str>, jvm_hprof::heap_dump::FieldType)>,
     }
     let mut class_field_info: HashMap<u64, ClassFieldInfo> = HashMap::with_capacity(num_classes);
+    // Intern pool for field name strings — avoids duplicate allocations across classes
+    let mut field_name_intern: HashMap<u64, Arc<str>> = HashMap::new();
     // Track all classloader object IDs (for classloader-aware leak detection)
     let mut classloader_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
@@ -766,18 +841,30 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
                         let instance_size = class.instance_size_bytes();
                         class_instance_sizes.insert(obj_id, instance_size);
 
-                        // Collect field types for typed reference extraction
+                        // Collect field types and names for typed reference extraction
                         let super_id = class.super_class_obj_id().map(|id| id.id());
-                        let mut own_field_types = Vec::new();
+                        let mut own_fields = Vec::new();
                         for fd_result in class.instance_field_descriptors() {
                             match fd_result {
-                                Ok(fd) => own_field_types.push(fd.field_type()),
+                                Ok(fd) => {
+                                    let name_id = fd.name_id().id();
+                                    let field_name = field_name_intern
+                                        .entry(name_id)
+                                        .or_insert_with(|| {
+                                            let name = string_table.get(&name_id)
+                                                .map(|s| s.as_str())
+                                                .unwrap_or("<unknown>");
+                                            Arc::from(name)
+                                        })
+                                        .clone();
+                                    own_fields.push((field_name, fd.field_type()));
+                                }
                                 Err(e) => log::warn!("Failed to parse field descriptor in class 0x{:x}: {:?}", obj_id, e),
                             }
                         }
                         class_field_info.insert(obj_id, ClassFieldInfo {
                             super_class_id: super_id,
-                            own_field_types,
+                            own_fields,
                         });
 
                         // Track classloader object IDs
@@ -797,7 +884,7 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
 
     // Resolve inheritance chains with memoization: once a parent's layout is resolved,
     // child classes reuse it instead of re-walking. This avoids O(N²) in deep hierarchies.
-    let mut class_field_layouts: HashMap<u64, Vec<jvm_hprof::heap_dump::FieldType>> = HashMap::with_capacity(class_field_info.len());
+    let mut class_field_layouts: HashMap<u64, Vec<(Arc<str>, jvm_hprof::heap_dump::FieldType)>> = HashMap::with_capacity(class_field_info.len());
     let class_ids: Vec<u64> = class_field_info.keys().copied().collect();
     for class_id in class_ids {
         if class_field_layouts.contains_key(&class_id) {
@@ -828,13 +915,13 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
                 .and_then(|info| info.super_class_id)
                 .filter(|&id| id != 0)
                 .and_then(|pid| class_field_layouts.get(&pid));
-            let own_types = class_field_info.get(&cid)
-                .map(|info| &info.own_field_types[..])
+            let own_fields = class_field_info.get(&cid)
+                .map(|info| &info.own_fields[..])
                 .unwrap_or(&[]);
             let mut layout = Vec::with_capacity(
-                own_types.len() + parent_layout.map_or(0, |p| p.len())
+                own_fields.len() + parent_layout.map_or(0, |p| p.len())
             );
-            layout.extend_from_slice(own_types);
+            layout.extend_from_slice(own_fields);
             if let Some(parent) = parent_layout {
                 layout.extend_from_slice(parent);
             }
@@ -843,6 +930,7 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
     }
     log::info!("Resolved field layouts for {} classes", class_field_layouts.len());
     drop(class_field_info); // Free field descriptor data — resolved into layouts
+    drop(field_name_intern); // Free intern pool — names are now in layouts
 
     // Main heap dump scan
     for record_result in hprof.records_iter() {
@@ -1105,7 +1193,7 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
     for gc_root_id in &gc_root_ids {
         if let Some(&root_node) = id_to_node.get(gc_root_id) {
             if added_edges.insert((super_root, root_node)) {
-                graph.add_edge(super_root, root_node, ());
+                graph.add_edge(super_root, root_node, EdgeLabel::GcRoot);
                 edge_count += 1;
             }
         }
@@ -1139,21 +1227,23 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
                             if let Some(&instance_idx) = id_to_node.get(&instance_id) {
                                 let fields = instance.fields();
 
-                                if let Some(field_types) = class_field_layouts.get(&class_obj_id) {
+                                if let Some(field_layout) = class_field_layouts.get(&class_obj_id) {
                                     typed_instance_count += 1;
-                                    extract_typed_references(fields, id_size, field_types, |ref_id| {
+                                    extract_typed_references_named(fields, id_size, field_layout, |ref_id, fname| {
                                         if let Some(&ref_node) = id_to_node.get(&ref_id) {
                                             if added_edges.insert((instance_idx, ref_node)) {
-                                                graph.add_edge(instance_idx, ref_node, ());
+                                                let idx = intern_field_name(fname);
+                                                graph.add_edge(instance_idx, ref_node, EdgeLabel::InstanceField(idx));
                                                 edge_count += 1;
                                             }
                                         }
                                     });
+                                    let ft = types_only(field_layout);
 
                                     // --- Waste: collect String value references ---
                                     if string_class_id == Some(class_obj_id) {
                                         if let Some(value_array_id) = extract_nth_field_of_type(
-                                            fields, id_size, field_types,
+                                            fields, id_size, &ft,
                                             jvm_hprof::heap_dump::FieldType::ObjectId, 0,
                                         ) {
                                             if value_array_id != 0 {
@@ -1173,7 +1263,7 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
                                         || arraylist_class_id == Some(class_obj_id);
                                     if is_collection {
                                         if let Some(size_val) = extract_nth_field_of_type(
-                                            fields, id_size, field_types,
+                                            fields, id_size, &ft,
                                             jvm_hprof::heap_dump::FieldType::Int, 0,
                                         ) {
                                             if size_val == 0 {
@@ -1193,7 +1283,7 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
                                     extract_object_references_fallback(fields, id_size, |ref_id| {
                                         if let Some(&ref_node) = id_to_node.get(&ref_id) {
                                             if added_edges.insert((instance_idx, ref_node)) {
-                                                graph.add_edge(instance_idx, ref_node, ());
+                                                graph.add_edge(instance_idx, ref_node, EdgeLabel::Unknown);
                                                 edge_count += 1;
                                             }
                                         }
@@ -1211,7 +1301,7 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
                                         let ref_id = element_id.id();
                                         if let Some(&ref_node) = id_to_node.get(&ref_id) {
                                             if added_edges.insert((array_idx, ref_node)) {
-                                                graph.add_edge(array_idx, ref_node, ());
+                                                graph.add_edge(array_idx, ref_node, EdgeLabel::ArrayElement);
                                                 edge_count += 1;
                                             }
                                         }
@@ -1228,7 +1318,7 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
                                 if let Some(super_class_id) = class.super_class_obj_id() {
                                     if let Some(&super_class_node) = id_to_node.get(&super_class_id.id()) {
                                         if added_edges.insert((class_idx, super_class_node)) {
-                                            graph.add_edge(class_idx, super_class_node, ());
+                                            graph.add_edge(class_idx, super_class_node, EdgeLabel::SuperClass);
                                             edge_count += 1;
                                         }
                                     }
@@ -1238,7 +1328,7 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
                                 if let Some(class_loader_id) = class.class_loader_obj_id() {
                                     if let Some(&class_loader_node) = id_to_node.get(&class_loader_id.id()) {
                                         if added_edges.insert((class_idx, class_loader_node)) {
-                                            graph.add_edge(class_idx, class_loader_node, ());
+                                            graph.add_edge(class_idx, class_loader_node, EdgeLabel::ClassLoader);
                                             edge_count += 1;
                                         }
                                     }
@@ -1254,7 +1344,14 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
                                                     if ref_id_val != 0 {
                                                         if let Some(&ref_node) = id_to_node.get(&ref_id_val) {
                                                             if added_edges.insert((class_idx, ref_node)) {
-                                                                graph.add_edge(class_idx, ref_node, ());
+                                                                // Resolve static field name from string table
+                                                                let sf_name_id = static_field.name_id().id();
+                                                                let sf_name_str = string_table.get(&sf_name_id)
+                                                                    .map(|s| s.as_str())
+                                                                    .unwrap_or("<static>");
+                                                                let sf_arc: Arc<str> = Arc::from(sf_name_str);
+                                                                let sf_idx = intern_field_name(&sf_arc);
+                                                                graph.add_edge(class_idx, ref_node, EdgeLabel::StaticField(sf_idx));
                                                                 edge_count += 1;
                                                             }
                                                         }
@@ -1337,6 +1434,7 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
         }
     }
     drop(added_edges); // Free edge dedup set before dominator analysis
+    drop(string_table); // Free string table memory — no longer needed after Pass 2
 
     log::info!("Pass 2 complete: added {} edges (typed: {} instances, fallback: {} instances)", edge_count, typed_instance_count, fallback_instance_count);
     log::info!("Waste data collected: {} string instances, {} backing arrays, {} empty collections",
@@ -1347,12 +1445,18 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
         graph.edge_count()
     );
 
+    log::info!("Field name table: {} unique names", field_name_table.len());
+
+    drop(field_name_index); // Interning complete — only field_name_table needed going forward
     Ok((HeapGraph {
         graph,
         id_to_node,
         super_root,
         summary,
         classloader_ids,
+        field_name_table,
+        class_field_layouts,
+        id_size,
     }, waste_data))
 }
 
@@ -1405,21 +1509,25 @@ fn field_type_size(ft: &jvm_hprof::heap_dump::FieldType, id_size: IdSize) -> usi
     }
 }
 
-/// Extracts object references from instance field data using typed field descriptors.
-///
-/// Iterates through the field types in order, reading only ObjectId fields as references
-/// and skipping primitive fields by their known byte sizes.
-fn extract_typed_references<F>(
+/// Extracts just the FieldType values from a named field layout.
+/// Used for backward-compatible calls to extract_typed_references / extract_nth_field_of_type.
+fn types_only(layout: &[(Arc<str>, jvm_hprof::heap_dump::FieldType)]) -> Vec<jvm_hprof::heap_dump::FieldType> {
+    layout.iter().map(|(_, ft)| *ft).collect()
+}
+
+/// Extracts object references from instance field data using typed field descriptors,
+/// also yielding the field name for each reference.
+fn extract_typed_references_named<F>(
     data: &[u8],
     id_size: IdSize,
-    field_types: &[jvm_hprof::heap_dump::FieldType],
+    field_layout: &[(Arc<str>, jvm_hprof::heap_dump::FieldType)],
     mut callback: F,
 )
 where
-    F: FnMut(u64),
+    F: FnMut(u64, &Arc<str>),
 {
     let mut offset = 0;
-    for ft in field_types {
+    for (name, ft) in field_layout {
         let size = field_type_size(ft, id_size);
         if offset + size > data.len() {
             break;
@@ -1439,7 +1547,7 @@ where
                 }
             };
             if id != 0 {
-                callback(id);
+                callback(id, name);
             }
         }
         offset += size;
@@ -1662,6 +1770,9 @@ pub struct ObjectReport {
     /// The retained size of this object in bytes.
     /// Retained size = shallow size + sum of retained sizes of all children in dominator tree.
     pub retained_size: u64,
+    /// The field name through which the parent references this object (if known).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field_name: Option<String>,
     /// The node index in the graph (for reference).
     #[serde(skip_serializing)]
     pub node_index: NodeIndex,
@@ -1683,6 +1794,7 @@ impl ObjectReport {
             class_name,
             shallow_size,
             retained_size,
+            field_name: None,
             node_index,
         }
     }
@@ -2273,14 +2385,34 @@ pub struct AnalysisState {
     pub leak_suspects: Vec<LeakSuspect>,
     /// Heap summary statistics.
     pub summary: HeapSummary,
-    /// Reverse reference adjacency list: for each node, who references it in the original heap graph.
+    /// Reverse reference adjacency list: for each node, who references it and via which edge label.
     /// Used for BFS backward traversal to find GC root paths.
-    pub reverse_refs: HashMap<NodeIndex, Vec<NodeIndex>>,
+    pub reverse_refs: HashMap<NodeIndex, Vec<(NodeIndex, EdgeLabel)>>,
     /// Waste analysis: duplicate strings and empty collections.
     pub waste_analysis: WasteAnalysis,
+    /// Field name table: maps u32 index → field name string.
+    pub field_name_table: Vec<Arc<str>>,
+    /// Per-class field layouts for object inspection (class_obj_id → named field list).
+    pub class_field_layouts: HashMap<u64, Vec<(Arc<str>, jvm_hprof::heap_dump::FieldType)>>,
+    /// HPROF identifier size (4 or 8 bytes).
+    pub id_size: IdSize,
 }
 
 impl AnalysisState {
+    /// Resolves an EdgeLabel to a human-readable field name string.
+    pub fn resolve_edge_label(&self, label: &EdgeLabel) -> Option<String> {
+        match label {
+            EdgeLabel::InstanceField(idx) | EdgeLabel::StaticField(idx) => {
+                self.field_name_table.get(*idx as usize).map(|s| s.to_string())
+            }
+            EdgeLabel::ArrayElement => Some("[element]".to_string()),
+            EdgeLabel::SuperClass => Some("<super>".to_string()),
+            EdgeLabel::ClassLoader => Some("<classloader>".to_string()),
+            EdgeLabel::GcRoot => Some("<gc-root>".to_string()),
+            EdgeLabel::Unknown => None,
+        }
+    }
+
     /// Gets the children of a node in the dominator tree.
     /// 
     /// # Arguments
@@ -2321,14 +2453,24 @@ impl AnalysisState {
                 continue;
             }
 
-            children_reports.push(ObjectReport::new(
+            // Look up the edge label from parent→child in reverse_refs
+            let field_name = self.reverse_refs.get(&child_idx)
+                .and_then(|refs| {
+                    refs.iter()
+                        .find(|(src, _)| *src == node_idx)
+                        .and_then(|(_, label)| self.resolve_edge_label(label))
+                });
+
+            let mut report = ObjectReport::new(
                 child_object_id,
                 node_type.to_string(),
                 class_name.to_string(),
                 shallow,
                 retained,
                 child_idx,
-            ));
+            );
+            report.field_name = field_name;
+            children_reports.push(report);
         }
 
         if children_reports.is_empty() {
@@ -2356,8 +2498,9 @@ impl AnalysisState {
         // Find the target node
         let target_idx = *self.id_to_node.get(&object_id)?;
 
-        // BFS backward from target through reverse_refs, with depth tracking
-        let mut came_from: HashMap<NodeIndex, Option<NodeIndex>> = HashMap::new();
+        // BFS backward from target through reverse_refs, with depth tracking.
+        // came_from stores (previous_node, edge_label_from_previous_to_current).
+        let mut came_from: HashMap<NodeIndex, Option<(NodeIndex, Option<EdgeLabel>)>> = HashMap::new();
         came_from.insert(target_idx, None);
 
         let mut found_root: Option<NodeIndex> = None;
@@ -2385,9 +2528,12 @@ impl AnalysisState {
 
             // Expand backward: who references current?
             if let Some(referrers) = self.reverse_refs.get(&current) {
-                for &referrer in referrers {
+                for &(referrer, label) in referrers {
                     if !came_from.contains_key(&referrer) {
-                        came_from.insert(referrer, Some(current));
+                        // The edge goes referrer→current, so the label applies to the
+                        // forward direction. We store it so we can attach it to the
+                        // path hop from referrer to current.
+                        came_from.insert(referrer, Some((current, Some(label))));
                         queue.push_back((referrer, depth + 1));
                     }
                 }
@@ -2409,17 +2555,24 @@ impl AnalysisState {
             };
             let shallow = self.shallow_sizes.get(i).copied().unwrap_or(0);
             let retained = self.retained_sizes.get(i).copied().unwrap_or(0);
-            path.push(ObjectReport::new(obj_id, node_type.to_string(), class_name, shallow, retained, current));
+
+            // Resolve the edge label for the hop from current → next
+            let field_name = came_from.get(&current)
+                .and_then(|opt| opt.as_ref())
+                .and_then(|(_, label_opt)| label_opt.as_ref())
+                .and_then(|label| self.resolve_edge_label(label));
+
+            let mut report = ObjectReport::new(obj_id, node_type.to_string(), class_name, shallow, retained, current);
+            report.field_name = field_name;
+            path.push(report);
 
             if current == target_idx {
                 break;
             }
 
-            // came_from[current] = Some(next_node_toward_target)
-            // Since BFS expanded backward from target, came_from[node] points
-            // toward the target along the discovered path.
+            // came_from[current] = Some((next_node_toward_target, edge_label))
             match came_from.get(&current) {
-                Some(Some(next)) => current = *next,
+                Some(Some((next, _))) => current = *next,
                 _ => break,
             }
         }
@@ -2503,6 +2656,172 @@ impl AnalysisState {
         result.sort();
         result
     }
+
+    /// Inspects all fields of a specific object instance.
+    ///
+    /// Re-opens and scans the HPROF file to find the Instance record with
+    /// the given object ID, then parses its field bytes using the stored
+    /// class_field_layouts to produce a detailed field listing.
+    ///
+    /// # Arguments
+    ///
+    /// * `hprof_path` - Path to the HPROF file
+    /// * `object_id` - The HPROF object ID to inspect
+    ///
+    /// # Returns
+    ///
+    /// A vector of `FieldInfo` describing each field, or `None` if the
+    /// object is not an Instance or cannot be found.
+    pub fn inspect_object(&self, hprof_path: &Path, object_id: u64) -> Option<Vec<FieldInfo>> {
+        use jvm_hprof::heap_dump::FieldType;
+
+        // Verify the object exists in our graph and is an Instance
+        let node_idx = self.id_to_node.get(&object_id)?;
+        let i = node_idx.index();
+        if i >= self.node_data_map.len() {
+            return None;
+        }
+        let (_, node_type, _) = &self.node_data_map[i];
+        if *node_type != "Instance" {
+            return None;
+        }
+
+        // Re-mmap the HPROF file
+        let loader = HprofLoader::new(hprof_path.to_path_buf());
+        let mmap = loader.map_file().ok()?;
+        let hprof = parse_hprof(&mmap[..]).ok()?;
+
+        // Scan for the Instance record with matching obj_id
+        for record_result in hprof.records_iter() {
+            let record = match record_result {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            if record.tag() != RecordTag::HeapDump && record.tag() != RecordTag::HeapDumpSegment {
+                continue;
+            }
+            let heap_dump = match record.as_heap_dump_segment() {
+                Some(Ok(hd)) => hd,
+                _ => continue,
+            };
+            for sub_record_result in heap_dump.sub_records() {
+                let sub_record = match sub_record_result {
+                    Ok(sr) => sr,
+                    Err(_) => continue,
+                };
+                if let jvm_hprof::heap_dump::SubRecord::Instance(instance) = sub_record {
+                    if instance.obj_id().id() != object_id {
+                        continue;
+                    }
+                    let class_obj_id = instance.class_obj_id().id();
+                    let field_layout = self.class_field_layouts.get(&class_obj_id)?;
+                    let field_data = instance.fields();
+
+                    let mut fields = Vec::with_capacity(field_layout.len());
+                    let mut offset = 0;
+
+                    for (name, ft) in field_layout {
+                        let size = field_type_size(ft, self.id_size);
+                        if offset + size > field_data.len() {
+                            break;
+                        }
+
+                        let type_str = match ft {
+                            FieldType::ObjectId => "ref".to_string(),
+                            FieldType::Boolean => "boolean".to_string(),
+                            FieldType::Byte => "byte".to_string(),
+                            FieldType::Char => "char".to_string(),
+                            FieldType::Short => "short".to_string(),
+                            FieldType::Int => "int".to_string(),
+                            FieldType::Float => "float".to_string(),
+                            FieldType::Long => "long".to_string(),
+                            FieldType::Double => "double".to_string(),
+                        };
+
+                        let bytes = &field_data[offset..offset + size];
+                        let raw_value = match size {
+                            1 => bytes[0] as u64,
+                            2 => u16::from_be_bytes([bytes[0], bytes[1]]) as u64,
+                            4 => u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u64,
+                            8 => u64::from_be_bytes([
+                                bytes[0], bytes[1], bytes[2], bytes[3],
+                                bytes[4], bytes[5], bytes[6], bytes[7],
+                            ]),
+                            _ => 0,
+                        };
+
+                        let (primitive_value, ref_object_id, ref_summary) = match ft {
+                            FieldType::ObjectId => {
+                                if raw_value == 0 {
+                                    (Some("null".to_string()), None, None)
+                                } else {
+                                    let summary = self.id_to_node.get(&raw_value).map(|&ref_idx| {
+                                        let ri = ref_idx.index();
+                                        let (_, rnt, rcn) = if ri < self.node_data_map.len() {
+                                            let (_, nt, ref cn) = &self.node_data_map[ri];
+                                            (0u64, *nt, cn.to_string())
+                                        } else {
+                                            (0u64, "Unknown", String::new())
+                                        };
+                                        let rs = self.shallow_sizes.get(ri).copied().unwrap_or(0);
+                                        let rr = self.retained_sizes.get(ri).copied().unwrap_or(0);
+                                        RefSummary {
+                                            class_name: rcn,
+                                            node_type: rnt.to_string(),
+                                            shallow_size: rs,
+                                            retained_size: rr,
+                                        }
+                                    });
+                                    (None, Some(raw_value), summary)
+                                }
+                            }
+                            FieldType::Boolean => {
+                                (Some(if raw_value != 0 { "true" } else { "false" }.to_string()), None, None)
+                            }
+                            FieldType::Char => {
+                                let ch = std::char::from_u32(raw_value as u32)
+                                    .unwrap_or('\u{FFFD}');
+                                (Some(format!("'{}'", ch)), None, None)
+                            }
+                            FieldType::Float => {
+                                let f = f32::from_bits(raw_value as u32);
+                                (Some(format!("{}", f)), None, None)
+                            }
+                            FieldType::Double => {
+                                let d = f64::from_bits(raw_value);
+                                (Some(format!("{}", d)), None, None)
+                            }
+                            _ => {
+                                // Int, Long, Short, Byte — display as signed integer
+                                let signed = match ft {
+                                    FieldType::Byte => (raw_value as i8) as i64,
+                                    FieldType::Short => (raw_value as i16) as i64,
+                                    FieldType::Int => (raw_value as i32) as i64,
+                                    FieldType::Long => raw_value as i64,
+                                    _ => raw_value as i64,
+                                };
+                                (Some(format!("{}", signed)), None, None)
+                            }
+                        };
+
+                        fields.push(FieldInfo {
+                            name: name.to_string(),
+                            field_type: type_str,
+                            primitive_value,
+                            ref_object_id,
+                            ref_summary,
+                        });
+
+                        offset += size;
+                    }
+
+                    return Some(fields);
+                }
+            }
+        }
+
+        None
+    }
 }
 
 /// Calculates dominators and returns both top objects and analysis state.
@@ -2512,17 +2831,18 @@ impl AnalysisState {
 pub fn calculate_dominators_with_state(graph: HeapGraph, waste_data: WasteRawData) -> Result<(Vec<ObjectReport>, AnalysisState)> {
     log::debug!("Calculating dominators with state for {} nodes", graph.node_count());
 
-    let HeapGraphParts { graph: petgraph, id_to_node, super_root, mut summary, classloader_ids } = graph.into_parts();
+    let HeapGraphParts { graph: petgraph, id_to_node, super_root, mut summary, classloader_ids, field_name_table, class_field_layouts, id_size } = graph.into_parts();
 
     // Step 1: Compute dominator tree
     let dominators = dominators::simple_fast(&petgraph, super_root);
     log::info!("Dominator tree computed successfully");
 
-    // Step 1b: Build reverse reference adjacency list from original graph edges
-    let mut reverse_refs: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::with_capacity(petgraph.node_count());
+    // Step 1b: Build reverse reference adjacency list from original graph edges (with labels)
+    let mut reverse_refs: HashMap<NodeIndex, Vec<(NodeIndex, EdgeLabel)>> = HashMap::with_capacity(petgraph.node_count());
     for edge in petgraph.edge_indices() {
         if let Some((source, target)) = petgraph.edge_endpoints(edge) {
-            reverse_refs.entry(target).or_insert_with(Vec::new).push(source);
+            let label = petgraph[edge];
+            reverse_refs.entry(target).or_insert_with(Vec::new).push((source, label));
         }
     }
     log::info!("Built reverse reference map: {} entries", reverse_refs.len());
@@ -2922,6 +3242,9 @@ pub fn calculate_dominators_with_state(graph: HeapGraph, waste_data: WasteRawDat
         summary,
         reverse_refs,
         waste_analysis,
+        field_name_table,
+        class_field_layouts,
+        id_size,
     };
 
     Ok((top_50, state))
@@ -3072,7 +3395,7 @@ mod tests {
         node_data: &[(NodeIndex, u64, &'static str, &str)], // (idx, object_id, node_type, class_name)
         super_root: NodeIndex,
     ) -> AnalysisState {
-        let mut reverse_refs: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
+        let mut reverse_refs: HashMap<NodeIndex, Vec<(NodeIndex, EdgeLabel)>> = HashMap::new();
         let mut children_map: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
         let mut id_to_node: HashMap<u64, NodeIndex> = HashMap::new();
 
@@ -3085,7 +3408,7 @@ mod tests {
         let mut retained_sizes: Vec<u64> = vec![0u64; vec_size];
 
         for &(src, tgt) in edges {
-            reverse_refs.entry(tgt).or_insert_with(Vec::new).push(src);
+            reverse_refs.entry(tgt).or_insert_with(Vec::new).push((src, EdgeLabel::Unknown));
             children_map.entry(src).or_insert_with(Vec::new).push(tgt);
         }
 
@@ -3116,6 +3439,9 @@ mod tests {
                 total_gc_roots: 1,
             },
             reverse_refs,
+            field_name_table: vec![],
+            class_field_layouts: HashMap::new(),
+            id_size: IdSize::U64,
             waste_analysis: WasteAnalysis {
                 total_wasted_bytes: 0,
                 waste_percentage: 0.0,

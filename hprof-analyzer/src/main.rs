@@ -8,7 +8,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use hprof_analyzer::{build_graph, calculate_dominators_with_state, compare_heaps, HprofLoader, WasteAnalysis};
+use hprof_analyzer::{build_graph, calculate_dominators_with_state, compare_heaps, FieldInfo, HprofLoader, WasteAnalysis};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -331,6 +331,24 @@ fn mcp_tool_definitions() -> serde_json::Value {
                 }
             },
             {
+                "name": "inspect_object",
+                "description": "Inspect all fields of a specific object instance. Returns field names, types, primitive values, and reference summaries (class name + retained size). Use the object_id from drill_down or execute_heapql results.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute path to the .hprof file (must have been analyzed first)"
+                        },
+                        "object_id": {
+                            "type": "integer",
+                            "description": "The HPROF object ID to inspect"
+                        }
+                    },
+                    "required": ["path", "object_id"]
+                }
+            },
+            {
                 "name": "compare_heaps",
                 "description": "Compare two previously analyzed heap dumps to see what changed. Shows summary deltas, class histogram changes (grew/shrank/new/removed), leak suspect changes (new/resolved/persisted), and waste deltas. Both files must have been analyzed first.",
                 "inputSchema": {
@@ -612,6 +630,34 @@ fn fmt_delta_bytes(delta: i64) -> String {
     format!("{}{}", sign, fmt_bytes(abs))
 }
 
+/// Formats an inspect_object result as a markdown table.
+fn format_inspect_result(fields: &[FieldInfo]) -> String {
+    let mut out = String::new();
+    out.push_str("## Object Fields\n\n");
+    out.push_str("| Field | Type | Value / Reference | Retained Size |\n");
+    out.push_str("|-------|------|-------------------|---------------|\n");
+    for f in fields {
+        let value = if let Some(ref pv) = f.primitive_value {
+            pv.clone()
+        } else if let Some(ref_id) = f.ref_object_id {
+            if let Some(ref summary) = f.ref_summary {
+                format!("{} (0x{:x})", summary.class_name, ref_id)
+            } else {
+                format!("0x{:x}", ref_id)
+            }
+        } else {
+            "—".to_string()
+        };
+        let retained = if let Some(ref summary) = f.ref_summary {
+            fmt_bytes(summary.retained_size)
+        } else {
+            "—".to_string()
+        };
+        out.push_str(&format!("| {} | {} | {} | {} |\n", f.name, f.field_type, value, retained));
+    }
+    out
+}
+
 /// Formats a comparison result as LLM-friendly markdown.
 fn format_comparison_result(result: &hprof_analyzer::HeapComparisonResult) -> String {
     let mut out = String::new();
@@ -812,6 +858,26 @@ fn handle_mcp_tool_call(
                     match state.execute_query(query) {
                         Ok(result) => mcp_text_result(&format_query_result(&result), false),
                         Err(e) => mcp_text_result(&format!("Query error: {}", e), true),
+                    }
+                }
+                Err(e) => mcp_text_result(&e, true),
+            }
+        }
+        "inspect_object" => {
+            let path = match arguments.get("path").and_then(|v| v.as_str()) {
+                Some(p) => p,
+                None => return mcp_text_result("Missing required parameter: path", true),
+            };
+            let object_id = match arguments.get("object_id").and_then(|v| v.as_u64()) {
+                Some(id) => id,
+                None => return mcp_text_result("Missing required parameter: object_id", true),
+            };
+            match get_analysis_state_for_path(analysis_states, path) {
+                Ok(state) => {
+                    let hprof_path = std::path::Path::new(path);
+                    match state.inspect_object(hprof_path, object_id) {
+                        Some(fields) => mcp_text_result(&format_inspect_result(&fields), false),
+                        None => mcp_text_result(&format!("Object 0x{:x} not found or is not an Instance", object_id), true),
                     }
                 }
                 Err(e) => mcp_text_result(&e, true),
@@ -1056,6 +1122,13 @@ async fn run_jsonrpc_server() -> Result<()> {
                     ).await {
                         eprintln!("Error handling gc_root_path request: {}", e);
                     }
+                } else if request.method == "inspect_object" {
+                    if let Err(e) = handle_inspect_object_request(
+                        request,
+                        &analysis_states,
+                    ).await {
+                        eprintln!("Error handling inspect_object request: {}", e);
+                    }
                 } else if request.method == "execute_query" {
                     if let Err(e) = handle_execute_query_request(
                         request,
@@ -1299,6 +1372,48 @@ async fn handle_gc_root_path_request(
         "jsonrpc": "2.0",
         "id": request_id,
         "result": gc_path
+    });
+    send_stdout(&response)?;
+
+    Ok(())
+}
+
+/// Handles an inspect_object request.
+async fn handle_inspect_object_request(
+    request: JsonRpcRequest,
+    analysis_states: &Arc<RwLock<HashMap<PathBuf, FileAnalysisState>>>,
+) -> Result<()> {
+    let params = request.params.ok_or_else(|| anyhow::anyhow!("Missing params"))?;
+    let path = params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'path' parameter"))?;
+    let object_id = params
+        .get("object_id")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'object_id' parameter"))?;
+
+    let request_id = request.id.ok_or_else(|| anyhow::anyhow!("Request ID required"))?;
+
+    let analysis_states_guard = analysis_states.read()
+        .map_err(|e| anyhow::anyhow!("Failed to read analysis states: {}", e))?;
+
+    let file_state = analysis_states_guard.get(&PathBuf::from(path))
+        .ok_or_else(|| anyhow::anyhow!("No analysis found for file: {}", path))?;
+
+    let state_guard = file_state.state.read()
+        .map_err(|e| anyhow::anyhow!("Failed to read analysis state: {}", e))?;
+
+    let analysis_state = state_guard.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Analysis state not available"))?;
+
+    let hprof_path = std::path::Path::new(path);
+    let fields = analysis_state.inspect_object(hprof_path, object_id);
+
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": fields
     });
     send_stdout(&response)?;
 
