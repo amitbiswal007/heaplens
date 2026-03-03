@@ -80,7 +80,13 @@ export function getHtmlTemplate(): string {
     <div id="tab-query" class="tab-content">
         <div class="query-container">
             <div class="query-input-row">
-                <textarea class="query-input" id="query-input" placeholder="SELECT * FROM class_histogram ORDER BY retained_size DESC LIMIT 10" rows="3"></textarea>
+                <div class="query-editor" id="query-editor">
+                    <pre class="query-highlight" id="query-highlight" aria-hidden="true"><code id="query-highlight-code"></code></pre>
+                    <textarea class="query-input" id="query-input"
+                        placeholder="SELECT * FROM class_histogram ORDER BY retained_size DESC LIMIT 10"
+                        rows="3" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+                    <div class="query-autocomplete" id="query-autocomplete" style="display:none;"></div>
+                </div>
                 <div class="query-actions">
                     <button class="btn query-run-btn" id="query-run-btn">Run</button>
                     <button class="btn query-help-btn" id="query-help-btn" title="Show help">?</button>

@@ -307,18 +307,106 @@ export function getStyles(): string {
         /* Query tab */
         .query-container { max-width: 100%; }
         .query-input-row { display: flex; gap: 8px; margin-bottom: 8px; }
-        .query-input {
+
+        /* Query editor overlay */
+        .query-editor {
+            position: relative;
             flex: 1;
+            min-height: 0;
+        }
+        .query-input {
+            position: relative;
+            z-index: 2;
+            width: 100%;
             font-family: var(--vscode-editor-font-family, monospace);
             font-size: 13px;
+            line-height: 1.5;
             padding: 8px 12px;
-            background: var(--vscode-input-background);
-            color: var(--vscode-input-foreground);
+            background: transparent;
+            color: transparent;
+            caret-color: var(--vscode-editorCursor-foreground, var(--vscode-foreground));
             border: 1px solid var(--vscode-input-border);
             border-radius: 4px;
             resize: vertical;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            overflow: auto;
         }
+        .query-input::placeholder { color: var(--vscode-input-placeholderForeground, rgba(128,128,128,0.6)); }
         .query-input:focus { outline: none; border-color: var(--vscode-focusBorder); }
+        .query-highlight {
+            position: absolute;
+            inset: 0;
+            z-index: 1;
+            pointer-events: none;
+            font-family: var(--vscode-editor-font-family, monospace);
+            font-size: 13px;
+            line-height: 1.5;
+            padding: 8px 12px;
+            margin: 0;
+            border: 1px solid transparent;
+            border-radius: 4px;
+            background: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            overflow: hidden;
+        }
+        .query-highlight code {
+            font-family: inherit;
+            font-size: inherit;
+            line-height: inherit;
+            background: none;
+            padding: 0;
+        }
+
+        /* HeapQL token colors */
+        .hql-keyword { color: var(--vscode-debugTokenExpression-name, #4fc1ff); font-weight: bold; }
+        .hql-table { color: var(--vscode-symbolIcon-classForeground, #ee9d28); }
+        .hql-column { color: var(--vscode-symbolIcon-fieldForeground, #75beff); }
+        .hql-string { color: var(--vscode-debugTokenExpression-string, #ce9178); }
+        .hql-number { color: var(--vscode-debugTokenExpression-number, #b5cea8); }
+        .hql-operator { color: var(--vscode-foreground); opacity: 0.9; }
+        .hql-special { color: var(--vscode-editorWarning-foreground, #cca700); font-weight: bold; }
+        .hql-star { color: var(--vscode-debugTokenExpression-name, #4fc1ff); font-weight: bold; }
+
+        /* Autocomplete dropdown */
+        .query-autocomplete {
+            position: absolute;
+            z-index: 10;
+            background: var(--vscode-editorSuggestWidget-background, var(--vscode-editorWidget-background));
+            border: 1px solid var(--vscode-editorSuggestWidget-border, var(--vscode-panel-border));
+            border-radius: 4px;
+            max-height: 200px;
+            overflow-y: auto;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+            min-width: 180px;
+            font-size: 13px;
+            font-family: var(--vscode-editor-font-family, monospace);
+        }
+        .query-ac-item {
+            display: flex;
+            align-items: center;
+            padding: 4px 10px;
+            cursor: pointer;
+            gap: 8px;
+        }
+        .query-ac-item:hover,
+        .query-ac-item.active {
+            background: var(--vscode-editorSuggestWidget-selectedBackground, var(--vscode-list-activeSelectionBackground));
+            color: var(--vscode-editorSuggestWidget-selectedForeground, var(--vscode-list-activeSelectionForeground));
+        }
+        .query-ac-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .query-ac-kind {
+            font-size: 10px;
+            padding: 1px 5px;
+            border-radius: 3px;
+            background: var(--vscode-badge-background);
+            color: var(--vscode-badge-foreground);
+            flex-shrink: 0;
+            opacity: 0.8;
+        }
+
         .query-actions { display: flex; flex-direction: column; gap: 4px; }
         .query-run-btn { min-width: 60px; }
         .query-help-btn { min-width: 60px; font-size: 16px; font-weight: bold; }
@@ -367,7 +455,7 @@ export function getStyles(): string {
         }
         .query-results { overflow-x: auto; }
         .query-results table { font-size: 12px; }
-        .query-results th { font-size: 11px; cursor: default; }
+        .query-results th { font-size: 11px; cursor: default; position: static; }
 
         .loading {
             padding: 40px;
