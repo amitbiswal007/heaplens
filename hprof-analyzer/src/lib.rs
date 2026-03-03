@@ -918,15 +918,16 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
             let own_fields = class_field_info.get(&cid)
                 .map(|info| &info.own_fields[..])
                 .unwrap_or(&[]);
-            // HPROF stores instance fields in superclass-first order:
-            // [Object fields...][Parent fields...][Own fields]
+            // Build full field layout: own fields first, then parent's resolved layout.
+            // This matches the byte order produced by the HotSpot HPROF agent, which
+            // writes instance field values starting from the most-derived class.
             let mut layout = Vec::with_capacity(
                 own_fields.len() + parent_layout.map_or(0, |p| p.len())
             );
+            layout.extend_from_slice(own_fields);
             if let Some(parent) = parent_layout {
                 layout.extend_from_slice(parent);
             }
-            layout.extend_from_slice(own_fields);
             class_field_layouts.insert(cid, layout);
         }
     }
