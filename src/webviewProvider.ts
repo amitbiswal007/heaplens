@@ -563,6 +563,73 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         .inspector-sizes { opacity: 0.5; font-size: 11px; flex-shrink: 0; }
         .inspector-loading { padding: 20px; text-align: center; opacity: 0.5; }
 
+        /* Explain button & area (inspector) */
+        .inspector-explain-btn {
+            display: block;
+            width: calc(100% - 32px);
+            margin: 12px 16px;
+            padding: 8px 12px;
+            background: var(--vscode-editorWidget-background);
+            color: var(--vscode-foreground);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            text-align: center;
+        }
+        .inspector-explain-btn:hover { background: var(--vscode-list-hoverBackground); }
+        .inspector-explain-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .inspector-explain-area {
+            display: none;
+            margin: 0 16px 12px;
+            padding: 10px 12px;
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 4px;
+            font-size: 12px;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .inspector-explain-area.visible { display: block; }
+        .inspector-explain-area.streaming {
+            border-left: 3px solid var(--vscode-focusBorder);
+        }
+        .inspector-explain-area.error {
+            border-color: var(--vscode-editorError-foreground);
+            color: var(--vscode-editorError-foreground);
+        }
+
+        /* Explain link & area (leak suspect cards) */
+        .suspect-explain-link {
+            cursor: pointer;
+            color: var(--vscode-textLink-foreground);
+            text-decoration: none;
+        }
+        .suspect-explain-link:hover { text-decoration: underline; }
+        .suspect-explain-area {
+            display: none;
+            margin-top: 10px;
+            padding: 10px 12px;
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 4px;
+            font-size: 12px;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .suspect-explain-area.visible { display: block; }
+        .suspect-explain-area.streaming {
+            border-left: 3px solid var(--vscode-focusBorder);
+        }
+        .suspect-explain-area.error {
+            border-color: var(--vscode-editorError-foreground);
+            color: var(--vscode-editorError-foreground);
+        }
+
         /* Auto-Diagnosis cards */
         .diagnosis-section { margin-bottom: 20px; }
         .diagnosis-card {
@@ -1011,6 +1078,64 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                 case 'compareError':
                     renderCompareError(msg.error);
                     break;
+                case 'explainChunk': {
+                    const area = document.getElementById('inspector-explain-area');
+                    if (area) {
+                        area.textContent += msg.text;
+                        area.scrollTop = area.scrollHeight;
+                    }
+                    break;
+                }
+                case 'explainDone': {
+                    const area = document.getElementById('inspector-explain-area');
+                    if (area) area.classList.remove('streaming');
+                    const btn = document.getElementById('inspector-explain-btn');
+                    if (btn) { btn.textContent = 'Explain this object'; btn.disabled = false; }
+                    break;
+                }
+                case 'explainError': {
+                    const area = document.getElementById('inspector-explain-area');
+                    if (area) {
+                        area.classList.remove('streaming');
+                        area.classList.add('error', 'visible');
+                        area.textContent = msg.message || 'An error occurred';
+                    }
+                    const btn = document.getElementById('inspector-explain-btn');
+                    if (btn) { btn.textContent = 'Explain this object'; btn.disabled = false; }
+                    break;
+                }
+                case 'explainLeakChunk': {
+                    const sanitizedId = msg.className.replace(/[^a-zA-Z0-9]/g, '_');
+                    const area = document.getElementById('explain-' + sanitizedId);
+                    if (area) {
+                        area.textContent += msg.text;
+                        area.scrollTop = area.scrollHeight;
+                    }
+                    break;
+                }
+                case 'explainLeakDone': {
+                    const sanitizedId = msg.className.replace(/[^a-zA-Z0-9]/g, '_');
+                    const area = document.getElementById('explain-' + sanitizedId);
+                    if (area) area.classList.remove('streaming');
+                    // Reset the link text
+                    document.querySelectorAll('.suspect-explain-link[data-class="' + msg.className + '"]').forEach(function(link) {
+                        link.textContent = 'Explain';
+                    });
+                    break;
+                }
+                case 'explainLeakError': {
+                    const sanitizedId = msg.className.replace(/[^a-zA-Z0-9]/g, '_');
+                    const area = document.getElementById('explain-' + sanitizedId);
+                    if (area) {
+                        area.classList.remove('streaming');
+                        area.classList.add('error', 'visible');
+                        area.textContent = msg.message || 'An error occurred';
+                    }
+                    document.querySelectorAll('.suspect-explain-link[data-class="' + msg.className + '"]').forEach(function(link) {
+                        link.textContent = 'Explain';
+                    });
+                    break;
+                }
                 case 'error':
                     showError(msg.message);
                     break;
@@ -1664,6 +1789,12 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     : '';
                 const cachedDep = depInfoCache[s.class_name];
                 const depBadge = cachedDep ? makeBadgeHtml(cachedDep.tier, cachedDep.dependency) : '';
+                const sanitizedId = s.class_name.replace(/[^a-zA-Z0-9]/g, '_');
+                const explainLink = ' | <a class="suspect-explain-link" data-class="' + escapeHtml(s.class_name) +
+                    '" data-retained="' + s.retained_size +
+                    '" data-pct="' + s.retained_percentage +
+                    '" data-desc="' + escapeHtml(s.description) +
+                    '" data-target="explain-' + sanitizedId + '">Explain</a>';
                 return '<div class="suspect-card ' + severity + '" data-class="' + escapeHtml(s.class_name) + '">' +
                     '<div class="suspect-header">' +
                     '<span class="suspect-class">' + escapeHtml(s.class_name) + '</span>' +
@@ -1672,7 +1803,8 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     '<div class="suspect-desc">' + escapeHtml(s.description) + '</div>' +
                     '<div style="margin-top:8px;opacity:0.6;font-size:12px;">Retained: ' + fmt(s.retained_size) +
                     (s.object_id ? ' | Object ID: ' + s.object_id : '') +
-                    sourceLink + gcPathLink + depBadge + '</div>' +
+                    sourceLink + gcPathLink + explainLink + depBadge + '</div>' +
+                    '<div class="suspect-explain-area" id="explain-' + sanitizedId + '"></div>' +
                     '</div>';
             }).join('');
 
@@ -1690,6 +1822,29 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     e.preventDefault();
                     const objectId = parseInt(link.dataset.objectId, 10);
                     if (objectId) vscode.postMessage({ command: 'gcRootPath', objectId: objectId });
+                });
+            });
+
+            // Wire up "Explain" click handlers
+            container.querySelectorAll('.suspect-explain-link').forEach(link => {
+                link.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    const targetId = link.dataset.target;
+                    const area = document.getElementById(targetId);
+                    if (!area) return;
+
+                    link.textContent = 'Analyzing...';
+                    area.classList.add('visible', 'streaming');
+                    area.classList.remove('error');
+                    area.textContent = '';
+
+                    vscode.postMessage({
+                        command: 'explainLeakSuspect',
+                        className: link.dataset.class,
+                        retainedSize: parseFloat(link.dataset.retained),
+                        retainedPercentage: parseFloat(link.dataset.pct),
+                        description: link.dataset.desc
+                    });
                 });
             });
         }
@@ -1730,6 +1885,10 @@ export function getWebviewContent(_webview: vscode.Webview): string {
         // ---- Object Inspector ----
         function openInspector(objectId, className, shallowSize, retainedSize) {
             const panel = document.getElementById('inspector-panel');
+            panel.dataset.objectId = objectId;
+            panel.dataset.className = className;
+            panel.dataset.shallowSize = shallowSize;
+            panel.dataset.retainedSize = retainedSize;
             panel.innerHTML = '<div class="inspector-header"><h3>' + escapeHtml(className) + '</h3><button class="inspector-close">&times;</button></div>' +
                 '<div style="padding:8px 16px;font-size:11px;opacity:0.6;">Shallow: ' + fmt(shallowSize) + ' | Retained: ' + fmt(retainedSize) + '</div>' +
                 '<div class="inspector-loading">Loading fields...</div>';
@@ -1778,6 +1937,10 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     '</div>';
             });
 
+            // Add explain button and area
+            html += '<button class="inspector-explain-btn" id="inspector-explain-btn">Explain this object</button>';
+            html += '<div id="inspector-explain-area" class="inspector-explain-area"></div>';
+
             body.className = 'inspector-body';
             body.innerHTML = html;
 
@@ -1791,6 +1954,29 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     }
                 });
             });
+
+            // Attach explain button handler
+            const explainBtn = document.getElementById('inspector-explain-btn');
+            const explainArea = document.getElementById('inspector-explain-area');
+            if (explainBtn && explainArea) {
+                explainBtn.addEventListener('click', function() {
+                    explainBtn.disabled = true;
+                    explainBtn.textContent = 'Analyzing...';
+                    explainArea.classList.add('visible', 'streaming');
+                    explainArea.classList.remove('error');
+                    explainArea.textContent = '';
+
+                    const panel = document.getElementById('inspector-panel');
+                    vscode.postMessage({
+                        command: 'explainObject',
+                        objectId: parseInt(panel.dataset.objectId),
+                        className: panel.dataset.className,
+                        shallowSize: parseInt(panel.dataset.shallowSize),
+                        retainedSize: parseInt(panel.dataset.retainedSize),
+                        fields: fields
+                    });
+                });
+            }
         }
 
         // ---- Incident Report ----

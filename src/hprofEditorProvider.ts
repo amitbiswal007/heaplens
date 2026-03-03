@@ -7,16 +7,7 @@ import { streamLlmResponse, LlmConfig, ChatMessage } from './llmClient';
 import { HEAP_ANALYSIS_SYSTEM_PROMPT, buildAnalyzePrompt } from './promptTemplates';
 import { resolveSource } from './sourceResolver';
 import type { DependencyInfo } from './dependencyResolver';
-
-/** Per-editor state, keyed by hprof file path. */
-interface EditorState {
-    webviewPanel: vscode.WebviewPanel;
-    analysisData: AnalysisData | null;
-    chatHistory: ChatMessage[];
-    pendingWebviewMessage: any;
-    webviewReady: boolean;
-    dependencyInfoCache: Map<string, { tier: string; dependency?: DependencyInfo }>;
-}
+import { allHandlers, MessageHandler, EditorState } from './messageHandlers';
 
 /**
  * Custom readonly editor provider for .hprof files.
@@ -28,6 +19,10 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
     public static readonly viewType = 'heaplens.hprofEditor';
 
     private static readonly MAX_CHAT_HISTORY = 40; // 20 user + 20 assistant messages
+
+    private static handlerMap = new Map<string, MessageHandler>(
+        allHandlers.map(h => [h.command, h])
+    );
 
     private rustClient: RustClient | null = null;
     private outputChannel: vscode.OutputChannel;
@@ -101,171 +96,21 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
             }
         });
 
-        // Wire webview <-> RustClient message passing
+        // Wire webview <-> RustClient message passing (handler registry)
         webviewPanel.webview.onDidReceiveMessage(async (message) => {
             this.outputChannel.appendLine(`[HeapLens] Webview message: ${message.command}`);
             const state = this.editors.get(hprofPath);
             if (!state) { return; } // editor was disposed
-            switch (message.command) {
-                case 'getChildren':
-                    this.outputChannel.appendLine(`[HeapLens] getChildren request for objectId: ${message.objectId}`);
-                    try {
-                        const children = await client.sendRequest('get_children', {
-                            path: hprofPath,
-                            object_id: message.objectId
-                        });
-                        this.outputChannel.appendLine(`[HeapLens] getChildren response: ${Array.isArray(children) ? children.length + ' children' : typeof children}`);
-                        if (Array.isArray(children) && children.length > 0) {
-                            this.outputChannel.appendLine(`[HeapLens] Sending childrenResponse with ${children.length} children`);
-                            webviewPanel.webview.postMessage({
-                                command: 'childrenResponse',
-                                objectId: message.objectId,
-                                children
-                            });
-                        } else {
-                            this.outputChannel.appendLine(`[HeapLens] No children, sending noChildren`);
-                            webviewPanel.webview.postMessage({
-                                command: 'noChildren',
-                                objectId: message.objectId,
-                                message: 'This object has no children in the dominator tree'
-                            });
-                        }
-                    } catch (error: any) {
-                        this.outputChannel.appendLine(`[HeapLens] getChildren error: ${error.message}`);
-                        webviewPanel.webview.postMessage({
-                            command: 'noChildren',
-                            objectId: message.objectId,
-                            message: error.message?.includes('not found')
-                                ? 'This object has no children'
-                                : error.message || String(error)
-                        });
-                    }
-                    break;
-                case 'chatMessage':
-                    this.handleChatMessage(message.text, hprofPath, webviewPanel);
-                    break;
-                case 'goToSource':
-                    await this.handleGoToSource(message.className, hprofPath, webviewPanel);
-                    break;
-                case 'queryDependencyInfo': {
-                    const cached = state.dependencyInfoCache.get(message.className);
-                    if (cached) {
-                        webviewPanel.webview.postMessage({
-                            command: 'dependencyResolved',
-                            className: message.className,
-                            tier: cached.tier,
-                            dependency: cached.dependency
-                        });
-                    }
-                    break;
-                }
-                case 'gcRootPath':
-                    this.outputChannel.appendLine(`[HeapLens] gcRootPath request for objectId: ${message.objectId}`);
-                    try {
-                        const gcPath = await client.sendRequest('gc_root_path', {
-                            path: hprofPath,
-                            object_id: message.objectId
-                        });
-                        webviewPanel.webview.postMessage({
-                            command: 'gcRootPathResponse',
-                            path: gcPath
-                        });
-                    } catch (error: any) {
-                        this.outputChannel.appendLine(`[HeapLens] gcRootPath error: ${error.message}`);
-                        webviewPanel.webview.postMessage({
-                            command: 'gcRootPathResponse',
-                            path: null
-                        });
-                    }
-                    break;
-                case 'inspectObject':
-                    this.outputChannel.appendLine(`[HeapLens] inspectObject request for objectId: ${message.objectId}`);
-                    try {
-                        const fields = await client.sendRequest('inspect_object', {
-                            path: hprofPath,
-                            object_id: message.objectId
-                        });
-                        webviewPanel.webview.postMessage({
-                            command: 'inspectObjectResponse',
-                            objectId: message.objectId,
-                            fields: fields
-                        });
-                    } catch (error: any) {
-                        this.outputChannel.appendLine(`[HeapLens] inspectObject error: ${error.message}`);
-                        webviewPanel.webview.postMessage({
-                            command: 'inspectObjectResponse',
-                            objectId: message.objectId,
-                            fields: null
-                        });
-                    }
-                    break;
-                case 'executeQuery':
-                    this.outputChannel.appendLine(`[HeapLens] executeQuery: ${message.query}`);
-                    try {
-                        const queryResult = await client.sendRequest('execute_query', {
-                            path: hprofPath,
-                            query: message.query
-                        });
-                        webviewPanel.webview.postMessage({
-                            command: 'queryResult',
-                            result: queryResult,
-                            query: message.query
-                        });
-                    } catch (error: any) {
-                        this.outputChannel.appendLine(`[HeapLens] executeQuery error: ${error.message}`);
-                        webviewPanel.webview.postMessage({
-                            command: 'queryError',
-                            error: error.message || String(error),
-                            query: message.query
-                        });
-                    }
-                    break;
-                case 'listAnalyzedFiles':
-                    try {
-                        const files = await client.sendRequest('list_analyzed_files', {});
-                        const otherFiles = Array.isArray(files) ? files.filter((f: string) => f !== hprofPath) : [];
-                        webviewPanel.webview.postMessage({
-                            command: 'analyzedFiles',
-                            files: otherFiles
-                        });
-                    } catch (error: any) {
-                        this.outputChannel.appendLine(`[HeapLens] listAnalyzedFiles error: ${error.message}`);
-                        webviewPanel.webview.postMessage({
-                            command: 'analyzedFiles',
-                            files: []
-                        });
-                    }
-                    break;
-                case 'compareHeaps':
-                    try {
-                        const compareResult = await client.sendRequest('compare_heaps', {
-                            current_path: hprofPath,
-                            baseline_path: message.baselinePath
-                        });
-                        webviewPanel.webview.postMessage({
-                            command: 'compareResult',
-                            result: compareResult
-                        });
-                    } catch (error: any) {
-                        this.outputChannel.appendLine(`[HeapLens] compareHeaps error: ${error.message}`);
-                        webviewPanel.webview.postMessage({
-                            command: 'compareError',
-                            error: error.message || String(error)
-                        });
-                    }
-                    break;
-                case 'copyReport':
-                    this.handleCopyReport(hprofPath, webviewPanel);
-                    break;
-                case 'ready':
-                    this.outputChannel.appendLine('[HeapLens] Webview ready');
-                    state.webviewReady = true;
-                    if (state.pendingWebviewMessage) {
-                        this.outputChannel.appendLine('[HeapLens] Resending buffered analysisComplete to webview');
-                        webviewPanel.webview.postMessage(state.pendingWebviewMessage);
-                        state.pendingWebviewMessage = null;
-                    }
-                    break;
+            const handler = HprofEditorProvider.handlerMap.get(message.command);
+            if (handler) {
+                await handler.handle(message, {
+                    hprofPath,
+                    state,
+                    webviewPanel,
+                    client,
+                    outputChannel: this.outputChannel,
+                    provider: this
+                });
             }
         });
 
@@ -401,7 +246,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         );
     }
 
-    private handleChatMessage(text: string, hprofPath: string, webviewPanel: vscode.WebviewPanel): void {
+    public handleChatMessage(text: string, hprofPath: string, webviewPanel: vscode.WebviewPanel): void {
         const state = this.editors.get(hprofPath);
         if (!state) { return; }
 
@@ -474,7 +319,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         return (bytes / Math.pow(k, idx)).toFixed(idx > 1 ? 2 : 0) + ' ' + sizes[idx];
     }
 
-    private handleCopyReport(hprofPath: string, webviewPanel: vscode.WebviewPanel): void {
+    public handleCopyReport(hprofPath: string, webviewPanel: vscode.WebviewPanel): void {
         const state = this.editors.get(hprofPath);
         if (!state?.analysisData) {
             vscode.window.showWarningMessage('No analysis data available for report.');
@@ -587,7 +432,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         });
     }
 
-    private async handleGoToSource(className: string, hprofPath: string, webviewPanel: vscode.WebviewPanel): Promise<void> {
+    public async handleGoToSource(className: string, hprofPath: string, webviewPanel: vscode.WebviewPanel): Promise<void> {
         this.outputChannel.appendLine(`[HeapLens] Go to source requested for: ${className}`);
         const state = this.editors.get(hprofPath);
         try {
