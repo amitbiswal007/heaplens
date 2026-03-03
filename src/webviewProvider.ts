@@ -630,6 +630,36 @@ export function getWebviewContent(_webview: vscode.Webview): string {
             color: var(--vscode-editorError-foreground);
         }
 
+        /* Markdown rendering in explain areas */
+        .md-code-block {
+            background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.2));
+            padding: 10px 12px;
+            border-radius: 4px;
+            margin: 8px 0;
+            overflow-x: auto;
+            font-family: var(--vscode-editor-font-family, monospace);
+            font-size: 12px;
+            line-height: 1.5;
+            white-space: pre;
+        }
+        .md-code-block code { background: none; padding: 0; }
+        .md-inline-code {
+            background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.2));
+            padding: 1px 4px;
+            border-radius: 3px;
+            font-family: var(--vscode-editor-font-family, monospace);
+            font-size: 12px;
+        }
+        .md-h1 { font-size: 16px; font-weight: bold; margin: 12px 0 6px; }
+        .md-h2 { font-size: 14px; font-weight: bold; margin: 10px 0 4px; }
+        .md-h3 { font-size: 13px; font-weight: bold; margin: 8px 0 4px; }
+        .md-li { padding-left: 16px; position: relative; }
+        .md-li-bullet, .md-li-num { position: absolute; left: 0; opacity: 0.6; }
+        .inspector-explain-area p, .suspect-explain-area p { margin: 0 0 6px; }
+        .inspector-explain-area.rendered, .suspect-explain-area.rendered {
+            white-space: normal;
+        }
+
         /* Auto-Diagnosis cards */
         .diagnosis-section { margin-bottom: 20px; }
         .diagnosis-card {
@@ -1079,21 +1109,29 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                     renderCompareError(msg.error);
                     break;
                 case 'explainChunk': {
+                    explainObjectBuffer += msg.text;
                     const area = document.getElementById('inspector-explain-area');
                     if (area) {
-                        area.textContent += msg.text;
+                        area.textContent = explainObjectBuffer;
                         area.scrollTop = area.scrollHeight;
                     }
                     break;
                 }
                 case 'explainDone': {
                     const area = document.getElementById('inspector-explain-area');
-                    if (area) area.classList.remove('streaming');
+                    if (area) {
+                        area.classList.remove('streaming');
+                        area.classList.add('rendered');
+                        area.innerHTML = renderMarkdown(explainObjectBuffer);
+                        area.scrollTop = 0;
+                    }
+                    explainObjectBuffer = '';
                     const btn = document.getElementById('inspector-explain-btn');
                     if (btn) { btn.textContent = 'Explain this object'; btn.disabled = false; }
                     break;
                 }
                 case 'explainError': {
+                    explainObjectBuffer = '';
                     const area = document.getElementById('inspector-explain-area');
                     if (area) {
                         area.classList.remove('streaming');
@@ -1106,9 +1144,11 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                 }
                 case 'explainLeakChunk': {
                     const sanitizedId = msg.className.replace(/[^a-zA-Z0-9]/g, '_');
+                    if (!explainLeakBuffers[sanitizedId]) explainLeakBuffers[sanitizedId] = '';
+                    explainLeakBuffers[sanitizedId] += msg.text;
                     const area = document.getElementById('explain-' + sanitizedId);
                     if (area) {
-                        area.textContent += msg.text;
+                        area.textContent = explainLeakBuffers[sanitizedId];
                         area.scrollTop = area.scrollHeight;
                     }
                     break;
@@ -1116,8 +1156,13 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                 case 'explainLeakDone': {
                     const sanitizedId = msg.className.replace(/[^a-zA-Z0-9]/g, '_');
                     const area = document.getElementById('explain-' + sanitizedId);
-                    if (area) area.classList.remove('streaming');
-                    // Reset the link text
+                    if (area) {
+                        area.classList.remove('streaming');
+                        area.classList.add('rendered');
+                        area.innerHTML = renderMarkdown(explainLeakBuffers[sanitizedId] || '');
+                        area.scrollTop = 0;
+                    }
+                    delete explainLeakBuffers[sanitizedId];
                     document.querySelectorAll('.suspect-explain-link[data-class="' + msg.className + '"]').forEach(function(link) {
                         link.textContent = 'Explain';
                     });
@@ -1125,6 +1170,7 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                 }
                 case 'explainLeakError': {
                     const sanitizedId = msg.className.replace(/[^a-zA-Z0-9]/g, '_');
+                    delete explainLeakBuffers[sanitizedId];
                     const area = document.getElementById('explain-' + sanitizedId);
                     if (area) {
                         area.classList.remove('streaming');
@@ -1166,6 +1212,44 @@ export function getWebviewContent(_webview: vscode.Webview): string {
             const div = document.createElement('div');
             div.textContent = str;
             return div.innerHTML;
+        }
+
+        // ---- Lightweight Markdown renderer for explain areas ----
+        let explainObjectBuffer = '';
+        const explainLeakBuffers = {};
+
+        function renderMarkdown(raw) {
+            let html = escapeHtml(raw);
+
+            // Fenced code blocks: \`\`\`lang\\n...\\n\`\`\`
+            html = html.replace(/\`\`\`(\\w*)\\n([\\s\\S]*?)\`\`\`/g, function(_, lang, code) {
+                return '<pre class="md-code-block"><code>' + code.replace(/\\n$/, '') + '</code></pre>';
+            });
+
+            // Inline code
+            html = html.replace(/\`([^\`]+)\`/g, '<code class="md-inline-code">$1</code>');
+
+            // Bold
+            html = html.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
+
+            // Headings (lines starting with ##)
+            html = html.replace(/^### (.+)$/gm, '<div class="md-h3">$1</div>');
+            html = html.replace(/^## (.+)$/gm, '<div class="md-h2">$1</div>');
+            html = html.replace(/^# (.+)$/gm, '<div class="md-h1">$1</div>');
+
+            // Numbered list items
+            html = html.replace(/^(\\d+)\\. (.+)$/gm, '<div class="md-li"><span class="md-li-num">$1.</span> $2</div>');
+
+            // Bullet list items
+            html = html.replace(/^- (.+)$/gm, '<div class="md-li"><span class="md-li-bullet">-</span> $1</div>');
+
+            // Paragraphs (double newline)
+            html = html.replace(/\\n\\n/g, '</p><p>');
+
+            // Single newlines (outside code blocks) to <br>
+            html = html.replace(/\\n/g, '<br>');
+
+            return '<p>' + html + '</p>';
         }
 
         function isResolvableClass(className) {
@@ -1962,8 +2046,9 @@ export function getWebviewContent(_webview: vscode.Webview): string {
                 explainBtn.addEventListener('click', function() {
                     explainBtn.disabled = true;
                     explainBtn.textContent = 'Analyzing...';
+                    explainObjectBuffer = '';
                     explainArea.classList.add('visible', 'streaming');
-                    explainArea.classList.remove('error');
+                    explainArea.classList.remove('error', 'rendered');
                     explainArea.textContent = '';
 
                     const panel = document.getElementById('inspector-panel');
