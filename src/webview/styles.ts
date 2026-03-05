@@ -993,6 +993,10 @@ export function getStyles(): string {
             opacity: 0.8;
             white-space: nowrap;
         }
+        .progress-message {
+            font-size: 13px;
+            padding: 4px 0;
+        }
 
         /* File metadata */
         .file-metadata {

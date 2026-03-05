@@ -361,6 +361,41 @@ const readyHandler: MessageHandler = {
     }
 };
 
+const cancelAnalysisHandler: MessageHandler = {
+    command: 'cancelAnalysis',
+    async handle(message, ctx) {
+        ctx.outputChannel.appendLine('[HeapLens] Cancel analysis requested from webview');
+        try {
+            await ctx.client.sendRequest('cancel_analysis', { path: ctx.hprofPath });
+        } catch (error: any) {
+            ctx.outputChannel.appendLine(`[HeapLens] cancel_analysis error: ${error.message}`);
+        }
+    }
+};
+
+const retryAnalysisHandler: MessageHandler = {
+    command: 'retryAnalysis',
+    async handle(_message, ctx) {
+        ctx.outputChannel.appendLine('[HeapLens] Retry analysis requested from webview');
+        ctx.webviewPanel.webview.postMessage({ command: 'analysisRetrying' });
+        try {
+            const response = await ctx.client.sendRequest('analyze_heap', { path: ctx.hprofPath });
+            if (response.status !== 'processing') {
+                ctx.webviewPanel.webview.postMessage({
+                    command: 'error',
+                    message: 'Unexpected response: ' + JSON.stringify(response)
+                });
+            }
+        } catch (error: any) {
+            ctx.outputChannel.appendLine(`[HeapLens] Retry error: ${error.message}`);
+            ctx.webviewPanel.webview.postMessage({
+                command: 'error',
+                message: error.message || String(error)
+            });
+        }
+    }
+};
+
 export const allHandlers: MessageHandler[] = [
     getChildrenHandler,
     chatMessageHandler,
@@ -375,4 +410,6 @@ export const allHandlers: MessageHandler[] = [
     compareHeapsHandler,
     copyReportHandler,
     readyHandler,
+    cancelAnalysisHandler,
+    retryAnalysisHandler,
 ];

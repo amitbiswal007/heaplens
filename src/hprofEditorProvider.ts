@@ -138,6 +138,18 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
             this.rustClient.onStderr = (msg: string) => {
                 this.outputChannel.appendLine(`[server] ${msg.trim()}`);
             };
+            this.rustClient.onProcessExit = (code: number | null, signal: string | null) => {
+                this.outputChannel.appendLine(`[HeapLens] Server process exited: code=${code}, signal=${signal}`);
+                // Notify all open webviews about the crash
+                if (code !== 0 && code !== null) {
+                    for (const [, state] of this.editors) {
+                        if (state.webviewReady) {
+                            state.webviewPanel.webview.postMessage({ command: 'serverCrashed' });
+                        }
+                    }
+                }
+                this.rustClient = null;
+            };
             this.outputChannel.appendLine('[HeapLens] Rust server process spawned');
             return this.rustClient;
         } catch (error: any) {
@@ -242,11 +254,21 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
             {
                 location: vscode.ProgressLocation.Notification,
                 title: 'HeapLens: Analyzing HPROF File',
-                cancellable: false
+                cancellable: true
             },
-            async (progress) => {
+            async (progress, cancellationToken) => {
                 progressRef = progress;
                 progress.report({ message: 'Starting analysis...' });
+
+                // Handle VS Code cancellation
+                cancellationToken.onCancellationRequested(() => {
+                    this.outputChannel.appendLine('[HeapLens] User cancelled analysis');
+                    client.sendRequest('cancel_analysis', { path: hprofPath }).catch(() => {});
+                    const state = this.editors.get(hprofPath);
+                    if (state?.webviewReady) {
+                        webviewPanel.webview.postMessage({ command: 'analysisCancelled' });
+                    }
+                });
 
                 try {
                     this.outputChannel.appendLine('[HeapLens] Awaiting analyze_heap response...');

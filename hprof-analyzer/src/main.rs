@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::signal;
 use tokio::sync::mpsc;
@@ -86,10 +86,11 @@ fn analyze_heap_blocking(
     path: PathBuf,
     request_id: u64,
     analysis_states: Arc<RwLock<HashMap<PathBuf, FileAnalysisState>>>,
+    cancel_token: Arc<AtomicBool>,
 ) -> AnalyzeHeapResult {
     log::info!("Starting heap analysis for: {:?} (request_id: {})", path, request_id);
 
-    match analyze_heap_internal(&path, analysis_states.clone()) {
+    match analyze_heap_internal(&path, analysis_states.clone(), &cancel_token) {
         Ok((top_objects, analysis_state)) => {
             log::info!("Heap analysis completed successfully (request_id: {})", request_id);
 
@@ -133,6 +134,7 @@ fn analyze_heap_blocking(
 fn analyze_heap_internal(
     path: &PathBuf,
     analysis_states: Arc<RwLock<HashMap<PathBuf, FileAnalysisState>>>,
+    cancel_token: &Arc<AtomicBool>,
 ) -> Result<(Vec<hprof_analyzer::ObjectReport>, Arc<hprof_analyzer::AnalysisState>)> {
     // Phase 1/4: Load and map the HPROF file
     eprintln!("[Progress] Step 1/4: Loading HPROF file...");
@@ -160,6 +162,10 @@ fn analyze_heap_internal(
     });
     if let Err(e) = send_stdout(&loading_notification) {
         eprintln!("[Progress] Failed to send loading notification: {}", e);
+    }
+
+    if cancel_token.load(Ordering::Relaxed) {
+        anyhow::bail!("Analysis cancelled");
     }
 
     // Phase 2/4: Build the heap graph
@@ -201,6 +207,10 @@ fn analyze_heap_internal(
     });
     if let Err(e) = send_stdout(&progress_notification) {
         eprintln!("[Progress] Failed to send progress notification: {}", e);
+    }
+
+    if cancel_token.load(Ordering::Relaxed) {
+        anyhow::bail!("Analysis cancelled");
     }
 
     // Phase 4/4: Calculate dominators and retained sizes
@@ -836,7 +846,8 @@ fn handle_mcp_tool_call(
             };
 
             eprintln!("[MCP] analyze_heap: {}", path);
-            match analyze_heap_internal(&PathBuf::from(path), analysis_states.clone()) {
+            let no_cancel = Arc::new(AtomicBool::new(false));
+            match analyze_heap_internal(&PathBuf::from(path), analysis_states.clone(), &no_cancel) {
                 Ok((top_objects, state)) => {
                     let text = format_analyze_result(&state, &top_objects);
                     mcp_text_result(&text, false)
@@ -1079,6 +1090,8 @@ async fn run_jsonrpc_server() -> Result<()> {
     let request_id_counter = Arc::new(AtomicU64::new(1));
     let analysis_states: Arc<RwLock<HashMap<PathBuf, FileAnalysisState>>> =
         Arc::new(RwLock::new(HashMap::new()));
+    let cancel_tokens: Arc<RwLock<HashMap<String, Arc<AtomicBool>>>> =
+        Arc::new(RwLock::new(HashMap::new()));
 
     // Spawn task to process results and send notifications
     let notification_handle = task::spawn(async move {
@@ -1124,6 +1137,7 @@ async fn run_jsonrpc_server() -> Result<()> {
         let result_tx = result_tx.clone();
         let request_id_counter = request_id_counter.clone();
         let analysis_states = analysis_states.clone();
+        let cancel_tokens = cancel_tokens.clone();
         task::spawn(async move {
             let stdin = tokio::io::stdin();
             let reader = BufReader::new(stdin);
@@ -1158,8 +1172,27 @@ async fn run_jsonrpc_server() -> Result<()> {
                         &result_tx,
                         &request_id_counter,
                         &analysis_states,
+                        &cancel_tokens,
                     ).await {
                         eprintln!("Error handling request: {}", e);
+                    }
+                } else if request.method == "cancel_analysis" {
+                    if let Err(e) = handle_cancel_analysis_request(
+                        request,
+                        &cancel_tokens,
+                    ).await {
+                        eprintln!("Error handling cancel_analysis request: {}", e);
+                    }
+                } else if request.method == "ping" {
+                    if let Some(id) = request.id {
+                        let response = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": { "status": "ok" }
+                        });
+                        if let Err(e) = send_stdout(&response) {
+                            eprintln!("Failed to send ping response: {}", e);
+                        }
                     }
                 } else if request.method == "get_children" {
                     if let Err(e) = handle_get_children_request(
@@ -1258,6 +1291,7 @@ async fn handle_analyze_heap_request(
     result_tx: &mpsc::UnboundedSender<AnalyzeHeapResult>,
     request_id_counter: &Arc<AtomicU64>,
     analysis_states: &Arc<RwLock<HashMap<PathBuf, FileAnalysisState>>>,
+    cancel_tokens: &Arc<RwLock<HashMap<String, Arc<AtomicBool>>>>,
 ) -> Result<()> {
     // Extract parameters
     let params = request.params.ok_or_else(|| anyhow::anyhow!("Missing params"))?;
@@ -1266,10 +1300,19 @@ async fn handle_analyze_heap_request(
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'path' parameter"))?;
     let path_buf = PathBuf::from(path);
+    let path_key = path.to_string();
 
     let request_id = request.id
         .and_then(|v| v.as_u64())
         .unwrap_or_else(|| request_id_counter.fetch_add(1, Ordering::Relaxed));
+
+    // Create cancel token for this analysis
+    let cancel_token = Arc::new(AtomicBool::new(false));
+    {
+        let mut tokens = cancel_tokens.write()
+            .map_err(|e| anyhow::anyhow!("Failed to write cancel tokens: {}", e))?;
+        tokens.insert(path_key.clone(), cancel_token.clone());
+    }
 
     // Respond immediately with processing status
     let processing_response = serde_json::json!({
@@ -1285,16 +1328,70 @@ async fn handle_analyze_heap_request(
     // Clone the result sender and analysis states for the blocking task
     let result_tx = result_tx.clone();
     let analysis_states = analysis_states.clone();
+    let cancel_tokens_cleanup = cancel_tokens.clone();
 
     // Spawn blocking task for CPU-intensive work
     task::spawn_blocking(move || {
-        let result = analyze_heap_blocking(path_buf, request_id, analysis_states);
+        let result = analyze_heap_blocking(path_buf, request_id, analysis_states, cancel_token);
+
+        // Clean up cancel token
+        if let Ok(mut tokens) = cancel_tokens_cleanup.write() {
+            tokens.remove(&path_key);
+        }
 
         // Send result via channel (non-blocking)
         if let Err(e) = result_tx.send(result) {
             eprintln!("Failed to send analysis result: {}", e);
         }
     });
+
+    Ok(())
+}
+
+/// Handles a cancel_analysis request.
+async fn handle_cancel_analysis_request(
+    request: JsonRpcRequest,
+    cancel_tokens: &Arc<RwLock<HashMap<String, Arc<AtomicBool>>>>,
+) -> Result<()> {
+    let params = request.params.ok_or_else(|| anyhow::anyhow!("Missing params"))?;
+    let path = params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'path' parameter"))?;
+
+    let request_id = request.id.ok_or_else(|| anyhow::anyhow!("Request ID required"))?;
+
+    let cancelled = if let Ok(tokens) = cancel_tokens.read() {
+        if let Some(token) = tokens.get(path) {
+            token.store(true, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": { "cancelled": cancelled }
+    });
+    send_stdout(&response)?;
+
+    // Send cancelled progress notification
+    if cancelled {
+        let notification = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "heap_analysis_progress",
+            "params": {
+                "stage": "cancelled"
+            }
+        });
+        if let Err(e) = send_stdout(&notification) {
+            eprintln!("Failed to send cancelled notification: {}", e);
+        }
+    }
 
     Ok(())
 }

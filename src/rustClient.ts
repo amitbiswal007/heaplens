@@ -59,6 +59,7 @@ export class RustClient {
     private process: ChildProcess;
     private isShutdown = false;
     public onStderr?: (message: string) => void;
+    public onProcessExit?: (code: number | null, signal: string | null) => void;
 
     /**
      * Creates a new RustClient instance.
@@ -99,6 +100,9 @@ export class RustClient {
         // Handle process exit
         this.process.on('exit', (code: number | null, signal: string | null) => {
             console.log(`[RustClient] Process exited: code=${code}, signal=${signal}`);
+            if (this.onProcessExit) {
+                this.onProcessExit(code, signal);
+            }
             this.shutdown(
                 code !== 0
                     ? new Error(`Rust process exited with code ${code}, signal ${signal}`)
