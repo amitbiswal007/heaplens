@@ -474,6 +474,15 @@ export function getStyles(): string {
             border-radius: 3px;
             font-size: 12px;
         }
+        .query-limit-warning {
+            padding: 8px 12px;
+            margin-bottom: 8px;
+            background: color-mix(in srgb, var(--vscode-editorWarning-foreground) 12%, var(--vscode-editorWidget-background));
+            border: 1px solid var(--vscode-editorWarning-foreground);
+            border-radius: 4px;
+            font-size: 12px;
+            color: var(--vscode-editorWarning-foreground);
+        }
         .query-results { overflow-x: auto; }
         .query-results table { font-size: 12px; }
         .query-results th { font-size: 11px; cursor: default; position: static; }

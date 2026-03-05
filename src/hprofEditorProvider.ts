@@ -269,6 +269,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                 // Handle VS Code cancellation
                 cancellationToken.onCancellationRequested(() => {
                     this.outputChannel.appendLine('[HeapLens] User cancelled analysis');
+                    // eslint-disable-next-line @typescript-eslint/no-empty-function
                     client.sendRequest('cancel_analysis', { path: hprofPath }).catch(() => {});
                     const state = this.editors.get(hprofPath);
                     if (state?.webviewReady) {

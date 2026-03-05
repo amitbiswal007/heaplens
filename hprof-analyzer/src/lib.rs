@@ -2687,6 +2687,13 @@ impl AnalysisState {
     /// A vector of `FieldInfo` describing each field, or `None` if the
     /// object is not an Instance or cannot be found.
     pub fn inspect_object(&self, hprof_path: &Path, object_id: u64) -> Option<Vec<FieldInfo>> {
+        let loader = HprofLoader::new(hprof_path.to_path_buf());
+        let mmap = loader.map_file().ok()?;
+        self.inspect_object_bytes(&mmap[..], object_id)
+    }
+
+    /// Inspect object fields using pre-loaded HPROF bytes (avoids re-mapping).
+    pub fn inspect_object_bytes(&self, hprof_bytes: &[u8], object_id: u64) -> Option<Vec<FieldInfo>> {
         use jvm_hprof::heap_dump::FieldType;
 
         // Verify the object exists in our graph and is an Instance
@@ -2700,10 +2707,7 @@ impl AnalysisState {
             return None;
         }
 
-        // Re-mmap the HPROF file
-        let loader = HprofLoader::new(hprof_path.to_path_buf());
-        let mmap = loader.map_file().ok()?;
-        let hprof = parse_hprof(&mmap[..]).ok()?;
+        let hprof = parse_hprof(hprof_bytes).ok()?;
 
         // Scan for the Instance record with matching obj_id
         for record_result in hprof.records_iter() {

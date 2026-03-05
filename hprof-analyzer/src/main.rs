@@ -76,6 +76,8 @@ struct FileAnalysisState {
     /// The file path this analysis is for.
     #[allow(dead_code)]
     path: PathBuf,
+    /// Cached memory-mapped file for inspect_object (avoids re-mapping on each call).
+    mmap: Option<Arc<memmap2::Mmap>>,
 }
 
 /// Performs the CPU-intensive heap analysis in a blocking task.
@@ -139,8 +141,9 @@ fn analyze_heap_internal(
     // Phase 1/4: Load and map the HPROF file
     eprintln!("[Progress] Step 1/4: Loading HPROF file...");
     let loader = HprofLoader::new(path.clone());
-    let mmap = loader.map_file()
+    let raw_mmap = loader.map_file()
         .with_context(|| format!("Failed to load HPROF file: {:?}", path))?;
+    let mmap = Arc::new(raw_mmap);
 
     let file_size = mmap.len() as u64;
     let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
@@ -245,6 +248,7 @@ fn analyze_heap_internal(
         states.insert(path.clone(), FileAnalysisState {
             state: Arc::new(RwLock::new(Some(analysis_state.clone()))),
             path: path.clone(),
+            mmap: Some(mmap),
         });
     }
 
@@ -1564,8 +1568,13 @@ async fn handle_inspect_object_request(
     let analysis_state = state_guard.as_ref()
         .ok_or_else(|| anyhow::anyhow!("Analysis state not available"))?;
 
-    let hprof_path = std::path::Path::new(path);
-    let fields = analysis_state.inspect_object(hprof_path, object_id);
+    // Use cached mmap if available, otherwise fall back to path-based re-mapping
+    let fields = if let Some(ref cached_mmap) = file_state.mmap {
+        analysis_state.inspect_object_bytes(&cached_mmap[..], object_id)
+    } else {
+        let hprof_path = std::path::Path::new(path);
+        analysis_state.inspect_object(hprof_path, object_id)
+    };
 
     let response = serde_json::json!({
         "jsonrpc": "2.0",

@@ -491,6 +491,8 @@ export function getQueryJs(): string {
             });
         }
 
+        var QUERY_ROW_LIMIT = 500;
+
         function renderQueryResult(result, query) {
             _queryRunBtn.disabled = false;
             _addToHistory(query);
@@ -500,9 +502,12 @@ export function getQueryJs(): string {
             var scanned = result.total_scanned || 0;
             var matched = result.total_matched || 0;
             var timeMs = (result.execution_time_ms || 0).toFixed(1);
+            var totalRows = rows.length;
+            var truncated = totalRows > QUERY_ROW_LIMIT;
+            var displayRows = truncated ? rows.slice(0, QUERY_ROW_LIMIT) : rows;
 
             _queryStatus.className = 'query-status';
-            _queryStatus.textContent = rows.length + ' row' + (rows.length !== 1 ? 's' : '') +
+            _queryStatus.textContent = displayRows.length + ' row' + (displayRows.length !== 1 ? 's' : '') +
                 ' returned (' + matched + ' matched, ' + scanned + ' scanned, ' + timeMs + 'ms)';
 
             if (rows.length === 0) {
@@ -510,15 +515,20 @@ export function getQueryJs(): string {
                 return;
             }
 
+            var html = '';
+            if (truncated) {
+                html += '<div class="query-limit-warning">Showing first ' + QUERY_ROW_LIMIT + ' of ' + totalRows + ' rows. Add LIMIT to your query.</div>';
+            }
+
             var sizeCols = ['shallow_size', 'retained_size', 'wasted_bytes', 'total_bytes'];
-            var html = '<table><thead><tr>';
+            html += '<table><thead><tr>';
             cols.forEach(function(col) {
                 var isSize = sizeCols.indexOf(col) !== -1;
                 html += '<th' + (isSize ? ' class="right"' : '') + '>' + escapeHtml(col) + '</th>';
             });
             html += '</tr></thead><tbody>';
 
-            rows.forEach(function(row) {
+            displayRows.forEach(function(row) {
                 html += '<tr>';
                 row.forEach(function(val, i) {
                     var col = cols[i];
