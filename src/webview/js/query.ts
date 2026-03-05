@@ -21,7 +21,7 @@ export function getQueryJs(): string {
         var _acBlurTimer = null;
 
         // ---- HeapQL schema ----
-        var _hqlKeywords = ['SELECT','FROM','WHERE','ORDER','BY','ASC','DESC','LIMIT','AND','OR','LIKE'];
+        var _hqlKeywords = ['SELECT','FROM','WHERE','ORDER','BY','ASC','DESC','LIMIT','AND','OR','LIKE','COUNT','SUM','AVG','MIN','MAX','GROUP'];
         var _hqlTables = ['instances','class_histogram','dominator_tree','leak_suspects'];
         var _hqlTableColumns = {
             instances: ['object_id','node_type','class_name','shallow_size','retained_size'],
@@ -263,6 +263,18 @@ export function getQueryJs(): string {
                 if (lastKw === 'SELECT' && (!partial || '*'.indexOf(partial) === 0)) {
                     items.unshift({ label: '*', kind: 'keyword' });
                 }
+                // Suggest aggregate functions after SELECT
+                if (lastKw === 'SELECT') {
+                    ['COUNT(','SUM(','AVG(','MIN(','MAX('].forEach(function(fn) {
+                        if (!partial || fn.toLowerCase().indexOf(partial) === 0) {
+                            items.push({ label: fn, kind: 'keyword' });
+                        }
+                    });
+                }
+            } else if (lastKw === 'GROUP') {
+                if (!partial || 'by'.indexOf(partial) === 0) {
+                    items.push({ label: 'BY', kind: 'keyword' });
+                }
             } else if (lastKw === 'ORDER') {
                 if (!partial || 'by'.indexOf(partial) === 0) {
                     items.push({ label: 'BY', kind: 'keyword' });
@@ -276,7 +288,7 @@ export function getQueryJs(): string {
                 });
             } else {
                 // Start of query or after a complete clause
-                var kws = ['SELECT','FROM','WHERE','ORDER BY','LIMIT','AND','OR'];
+                var kws = ['SELECT','FROM','WHERE','ORDER BY','GROUP BY','LIMIT','AND','OR'];
                 kws.forEach(function(kw) {
                     if (!partial || kw.toLowerCase().indexOf(partial) === 0) {
                         items.push({ label: kw, kind: 'keyword' });
@@ -520,7 +532,9 @@ export function getQueryJs(): string {
                 html += '<div class="query-limit-warning">Showing first ' + QUERY_ROW_LIMIT + ' of ' + totalRows + ' rows. Add LIMIT to your query.</div>';
             }
 
-            var sizeCols = ['shallow_size', 'retained_size', 'wasted_bytes', 'total_bytes'];
+            var sizeCols = ['shallow_size', 'retained_size', 'wasted_bytes', 'total_bytes',
+                'sum(shallow_size)', 'sum(retained_size)', 'avg(shallow_size)', 'avg(retained_size)',
+                'min(shallow_size)', 'min(retained_size)', 'max(shallow_size)', 'max(retained_size)'];
             html += '<table><thead><tr>';
             cols.forEach(function(col) {
                 var isSize = sizeCols.indexOf(col) !== -1;

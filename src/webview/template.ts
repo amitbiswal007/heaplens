@@ -106,7 +106,10 @@ export function getHtmlTemplate(): string {
                     <code>leak_suspects</code> (class_name, object_id, retained_size, retained_percentage, description)
                 </div>
                 <div class="query-help-section">
-                    <b>Syntax:</b> SELECT [columns|*] FROM table [WHERE conditions] [ORDER BY col [ASC|DESC]] [LIMIT n]
+                    <b>Syntax:</b> SELECT [columns|*|aggregates] FROM table [WHERE conditions] [GROUP BY col] [ORDER BY col [ASC|DESC]] [LIMIT n]
+                </div>
+                <div class="query-help-section">
+                    <b>Aggregations:</b> COUNT(*), COUNT(col), SUM(col), AVG(col), MIN(col), MAX(col). Use with GROUP BY for per-group results.
                 </div>
                 <div class="query-help-section">
                     <b>Operators:</b> =, !=, &gt;, &lt;, &gt;=, &lt;=, LIKE (% wildcards). Combine with AND / OR.
@@ -122,7 +125,8 @@ export function getHtmlTemplate(): string {
                     <b>Examples:</b><br>
                     <code>SELECT * FROM class_histogram ORDER BY retained_size DESC LIMIT 10</code><br>
                     <code>SELECT * FROM instances WHERE class_name LIKE '%Cache%' AND retained_size &gt; 1024</code><br>
-                    <code>SELECT class_name, retained_size FROM leak_suspects</code><br>
+                    <code>SELECT COUNT(*), SUM(retained_size) FROM instances</code><br>
+                    <code>SELECT class_name, COUNT(*) FROM instances GROUP BY class_name ORDER BY count(*) DESC LIMIT 10</code><br>
                     <code>:info 12345</code>
                 </div>
             </div>

@@ -44,6 +44,12 @@ enum Token {
     And,
     Or,
     Like,
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+    Group,
     Ident(String),
     StringLit(String),
     IntLit(u64),
@@ -72,13 +78,43 @@ pub enum Statement {
     Special(SpecialCommand),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum AggFunc {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+impl std::fmt::Display for AggFunc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AggFunc::Count => write!(f, "count"),
+            AggFunc::Sum => write!(f, "sum"),
+            AggFunc::Avg => write!(f, "avg"),
+            AggFunc::Min => write!(f, "min"),
+            AggFunc::Max => write!(f, "max"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum SelectColumn {
+    Named(String),
+    Star,
+    Aggregate(AggFunc, String), // func, column (or "*" for COUNT(*))
+}
+
 #[derive(Debug, Clone)]
 pub struct SelectStatement {
     pub columns: Vec<String>,
+    pub select_columns: Vec<SelectColumn>,
     pub table: TableName,
     pub where_clause: Option<WhereClause>,
     pub order_by: Option<OrderBy>,
     pub limit: Option<u64>,
+    pub group_by: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -331,6 +367,12 @@ impl Tokenizer {
             "AND" => Token::And,
             "OR" => Token::Or,
             "LIKE" => Token::Like,
+            "COUNT" => Token::Count,
+            "SUM" => Token::Sum,
+            "AVG" => Token::Avg,
+            "MIN" => Token::Min,
+            "MAX" => Token::Max,
+            "GROUP" => Token::Group,
             _ => Token::Ident(word),
         }
     }
@@ -405,7 +447,7 @@ impl Parser {
         self.advance(); // consume SELECT
 
         // Parse select list
-        let columns = self.parse_select_list()?;
+        let (columns, select_columns) = self.parse_select_list()?;
 
         // FROM
         self.expect(&Token::From)?;
@@ -415,6 +457,15 @@ impl Parser {
         let where_clause = if matches!(self.peek(), Token::Where) {
             self.advance();
             Some(self.parse_where()?)
+        } else {
+            None
+        };
+
+        // Optional GROUP BY
+        let group_by = if matches!(self.peek(), Token::Group) {
+            self.advance(); // consume GROUP
+            self.expect(&Token::By)?;
+            Some(self.parse_column_name()?)
         } else {
             None
         };
@@ -441,24 +492,59 @@ impl Parser {
 
         Ok(Statement::Select(SelectStatement {
             columns,
+            select_columns,
             table,
             where_clause,
             order_by,
             limit,
+            group_by,
         }))
     }
 
-    fn parse_select_list(&mut self) -> Result<Vec<String>, HeapQlError> {
+    fn parse_select_list(&mut self) -> Result<(Vec<String>, Vec<SelectColumn>), HeapQlError> {
         if matches!(self.peek(), Token::Star) {
             self.advance();
-            return Ok(vec!["*".into()]);
+            return Ok((vec!["*".into()], vec![SelectColumn::Star]));
         }
-        let mut cols = vec![self.parse_column_name()?];
+        let (name, sc) = self.parse_select_item()?;
+        let mut names = vec![name];
+        let mut scs = vec![sc];
         while matches!(self.peek(), Token::Comma) {
             self.advance();
-            cols.push(self.parse_column_name()?);
+            let (name, sc) = self.parse_select_item()?;
+            names.push(name);
+            scs.push(sc);
         }
-        Ok(cols)
+        Ok((names, scs))
+    }
+
+    fn parse_select_item(&mut self) -> Result<(String, SelectColumn), HeapQlError> {
+        // Check for aggregate function
+        let agg_func = match self.peek() {
+            Token::Count => Some(AggFunc::Count),
+            Token::Sum => Some(AggFunc::Sum),
+            Token::Avg => Some(AggFunc::Avg),
+            Token::Min => Some(AggFunc::Min),
+            Token::Max => Some(AggFunc::Max),
+            _ => None,
+        };
+
+        if let Some(func) = agg_func {
+            self.advance(); // consume the aggregate keyword
+            self.expect(&Token::LParen)?;
+            let col_name = if matches!(self.peek(), Token::Star) {
+                self.advance();
+                "*".to_string()
+            } else {
+                self.parse_column_name()?
+            };
+            self.expect(&Token::RParen)?;
+            let display = format!("{}({})", func, col_name);
+            Ok((display, SelectColumn::Aggregate(func, col_name)))
+        } else {
+            let name = self.parse_column_name()?;
+            Ok((name.clone(), SelectColumn::Named(name)))
+        }
     }
 
     fn parse_column_name(&mut self) -> Result<String, HeapQlError> {
@@ -534,7 +620,29 @@ impl Parser {
     }
 
     fn parse_order_by(&mut self) -> Result<OrderBy, HeapQlError> {
-        let column = self.parse_column_name()?;
+        // ORDER BY can reference aggregate expressions like count(*), sum(col)
+        let column = match self.peek() {
+            Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max => {
+                let func_name = match self.advance() {
+                    Token::Count => "count",
+                    Token::Sum => "sum",
+                    Token::Avg => "avg",
+                    Token::Min => "min",
+                    Token::Max => "max",
+                    _ => unreachable!(),
+                };
+                self.expect(&Token::LParen)?;
+                let col = if matches!(self.peek(), Token::Star) {
+                    self.advance();
+                    "*".to_string()
+                } else {
+                    self.parse_column_name()?
+                };
+                self.expect(&Token::RParen)?;
+                format!("{}({})", func_name, col)
+            }
+            _ => self.parse_column_name()?,
+        };
         let descending = match self.peek() {
             Token::Desc => { self.advance(); true }
             Token::Asc => { self.advance(); false }
@@ -703,7 +811,44 @@ impl AnalysisState {
 
     fn execute_select(&self, stmt: SelectStatement, start: Instant) -> Result<QueryResult, HeapQlError> {
         let all_columns: Vec<String> = table_columns(&stmt.table).iter().map(|s| s.to_string()).collect();
-        let _selected = validate_columns(&stmt.columns, &stmt.table)?;
+
+        // Check if query uses aggregates
+        let has_aggregates = stmt.select_columns.iter().any(|c| matches!(c, SelectColumn::Aggregate(_, _)));
+        let has_group_by = stmt.group_by.is_some();
+
+        // Validate: if aggregates are present, non-aggregate columns must be in GROUP BY
+        if has_aggregates {
+            for sc in &stmt.select_columns {
+                if let SelectColumn::Named(ref name) = sc {
+                    if let Some(ref gb) = stmt.group_by {
+                        if name != gb {
+                            return Err(HeapQlError::Parse(format!(
+                                "Column '{}' must appear in GROUP BY clause or be used in an aggregate function", name
+                            )));
+                        }
+                    } else {
+                        return Err(HeapQlError::Parse(format!(
+                            "Column '{}' must appear in GROUP BY clause or be used in an aggregate function", name
+                        )));
+                    }
+                }
+            }
+            // Validate aggregate column names (skip * for COUNT)
+            for sc in &stmt.select_columns {
+                if let SelectColumn::Aggregate(_, ref col) = sc {
+                    if col != "*" && !all_columns.contains(col) {
+                        return Err(HeapQlError::UnknownColumn(col.clone(), stmt.table.to_string()));
+                    }
+                }
+            }
+        } else if has_group_by {
+            return Err(HeapQlError::Parse("GROUP BY requires at least one aggregate function in SELECT".into()));
+        }
+
+        // For non-aggregate queries, validate columns as before
+        if !has_aggregates {
+            let _selected = validate_columns(&stmt.columns, &stmt.table)?;
+        }
 
         let has_order = stmt.order_by.is_some();
         let limit = stmt.limit.unwrap_or(u64::MAX);
@@ -858,6 +1003,109 @@ impl AnalysisState {
             }
         }
 
+        // AGGREGATION
+        if has_aggregates {
+            if has_group_by {
+                let gb_col = stmt.group_by.as_ref().unwrap();
+                let gb_idx = all_columns.iter().position(|c| c == gb_col)
+                    .ok_or_else(|| HeapQlError::UnknownColumn(gb_col.clone(), stmt.table.to_string()))?;
+
+                // Group rows by the GROUP BY column value
+                let mut groups: std::collections::HashMap<String, Vec<Row>> = std::collections::HashMap::new();
+                let mut group_order: Vec<String> = Vec::new();
+                for row in &rows {
+                    let key = match &row[gb_idx] {
+                        serde_json::Value::String(s) => s.clone(),
+                        v => v.to_string(),
+                    };
+                    if !groups.contains_key(&key) {
+                        group_order.push(key.clone());
+                    }
+                    groups.entry(key).or_default().push(row.clone());
+                }
+
+                // Build result columns and rows
+                let mut agg_columns: Vec<String> = Vec::new();
+                for sc in &stmt.select_columns {
+                    match sc {
+                        SelectColumn::Named(n) => agg_columns.push(n.clone()),
+                        SelectColumn::Aggregate(func, col) => agg_columns.push(format!("{}({})", func, col)),
+                        SelectColumn::Star => agg_columns.push("*".into()),
+                    }
+                }
+
+                let mut agg_rows: Vec<Row> = Vec::new();
+                for key in &group_order {
+                    let group_rows = &groups[key];
+                    let mut row_vals: Vec<serde_json::Value> = Vec::new();
+                    for sc in &stmt.select_columns {
+                        match sc {
+                            SelectColumn::Named(_) => {
+                                row_vals.push(serde_json::json!(key));
+                            }
+                            SelectColumn::Aggregate(func, col) => {
+                                row_vals.push(compute_aggregate(func, col, group_rows, &all_columns));
+                            }
+                            SelectColumn::Star => {
+                                row_vals.push(serde_json::json!(key));
+                            }
+                        }
+                    }
+                    agg_rows.push(row_vals);
+                }
+
+                total_matched = agg_rows.len() as u64;
+                rows = agg_rows;
+
+                // ORDER BY on aggregate results
+                if let Some(ref ob) = stmt.order_by {
+                    let col_idx = agg_columns.iter().position(|c| c == &ob.column)
+                        .ok_or_else(|| HeapQlError::UnknownColumn(ob.column.clone(), stmt.table.to_string()))?;
+                    rows.sort_by(|a, b| {
+                        let cmp = compare_json_values(&a[col_idx], &b[col_idx]);
+                        if ob.descending { cmp.reverse() } else { cmp }
+                    });
+                }
+
+                if let Some(lim) = stmt.limit {
+                    rows.truncate(lim as usize);
+                }
+
+                return Ok(QueryResult {
+                    columns: agg_columns,
+                    rows,
+                    total_scanned,
+                    total_matched,
+                    execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
+                });
+            } else {
+                // No GROUP BY — single-row aggregate result
+                let mut agg_columns: Vec<String> = Vec::new();
+                let mut agg_row: Vec<serde_json::Value> = Vec::new();
+                for sc in &stmt.select_columns {
+                    match sc {
+                        SelectColumn::Aggregate(func, col) => {
+                            let col_name = format!("{}({})", func, col);
+                            agg_columns.push(col_name);
+                            agg_row.push(compute_aggregate(func, col, &rows, &all_columns));
+                        }
+                        _ => {
+                            // Already validated above: shouldn't happen
+                            return Err(HeapQlError::Parse("Cannot mix aggregate and non-aggregate columns without GROUP BY".into()));
+                        }
+                    }
+                }
+
+                return Ok(QueryResult {
+                    columns: agg_columns,
+                    rows: vec![agg_row],
+                    total_scanned,
+                    total_matched,
+                    execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
+                });
+            }
+        }
+
         // ORDER BY
         if let Some(ref ob) = stmt.order_by {
             let col_idx = all_columns.iter().position(|c| c == &ob.column)
@@ -1009,6 +1257,58 @@ impl AnalysisState {
     }
 }
 
+fn compute_aggregate(func: &AggFunc, col: &str, rows: &[Row], all_columns: &[String]) -> serde_json::Value {
+    match func {
+        AggFunc::Count => {
+            if col == "*" {
+                serde_json::json!(rows.len() as u64)
+            } else {
+                // Count non-null values in column
+                let col_idx = all_columns.iter().position(|c| c == col);
+                match col_idx {
+                    Some(idx) => {
+                        let count = rows.iter().filter(|r| !r[idx].is_null()).count();
+                        serde_json::json!(count as u64)
+                    }
+                    None => serde_json::json!(0),
+                }
+            }
+        }
+        AggFunc::Sum | AggFunc::Avg | AggFunc::Min | AggFunc::Max => {
+            let col_idx = match all_columns.iter().position(|c| c == col) {
+                Some(idx) => idx,
+                None => return serde_json::json!(0),
+            };
+            let values: Vec<f64> = rows.iter()
+                .filter_map(|r| r[col_idx].as_f64().or_else(|| r[col_idx].as_u64().map(|n| n as f64)))
+                .collect();
+            if values.is_empty() {
+                return serde_json::json!(null);
+            }
+            match func {
+                AggFunc::Sum => {
+                    let sum: f64 = values.iter().sum();
+                    if sum == (sum as u64) as f64 { serde_json::json!(sum as u64) } else { serde_json::json!(sum) }
+                }
+                AggFunc::Avg => {
+                    let sum: f64 = values.iter().sum();
+                    let avg = sum / values.len() as f64;
+                    serde_json::json!((avg * 100.0).round() / 100.0)
+                }
+                AggFunc::Min => {
+                    let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
+                    if min == (min as u64) as f64 { serde_json::json!(min as u64) } else { serde_json::json!(min) }
+                }
+                AggFunc::Max => {
+                    let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                    if max == (max as u64) as f64 { serde_json::json!(max as u64) } else { serde_json::json!(max) }
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
 fn reports_to_result(reports: Vec<ObjectReport>, start: Instant) -> QueryResult {
     let len = reports.len() as u64;
     let columns = vec![
@@ -1041,6 +1341,7 @@ fn reports_to_result(reports: Vec<ObjectReport>, start: Instant) -> QueryResult 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
     use crate::{ClassHistogramEntry, EdgeLabel, LeakSuspect, HeapSummary, WasteAnalysis};
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -1408,5 +1709,103 @@ mod tests {
         let state = build_test_state();
         let result = state.execute_query("SELECT * FROM instances LIMIT 2").unwrap();
         assert!(result.rows.len() <= 2);
+    }
+
+    // -- Aggregation tests --
+
+    #[test]
+    fn test_count_star() {
+        let state = build_test_state();
+        let result = state.execute_query("SELECT COUNT(*) FROM instances").unwrap();
+        assert_eq!(result.columns, vec!["count(*)"]);
+        assert_eq!(result.rows.len(), 1);
+        // 4 instances in test state (HashMap, ArrayList, byte[], CacheManager)
+        assert_eq!(result.rows[0][0], serde_json::json!(4));
+    }
+
+    #[test]
+    fn test_sum_retained_size() {
+        let state = build_test_state();
+        let result = state.execute_query("SELECT SUM(retained_size) FROM instances").unwrap();
+        assert_eq!(result.columns, vec!["sum(retained_size)"]);
+        assert_eq!(result.rows.len(), 1);
+        // 2048 + 1024 + 1024 + 4096 = 8192
+        assert_eq!(result.rows[0][0], serde_json::json!(8192));
+    }
+
+    #[test]
+    fn test_avg_shallow_size() {
+        let state = build_test_state();
+        let result = state.execute_query("SELECT AVG(shallow_size) FROM instances").unwrap();
+        assert_eq!(result.columns, vec!["avg(shallow_size)"]);
+        assert_eq!(result.rows.len(), 1);
+        // (48 + 40 + 1024 + 32) / 4 = 286.0
+        assert_eq!(result.rows[0][0], serde_json::json!(286.0));
+    }
+
+    #[test]
+    fn test_min_max_retained() {
+        let state = build_test_state();
+        let result = state.execute_query("SELECT MIN(retained_size), MAX(retained_size) FROM instances").unwrap();
+        assert_eq!(result.columns, vec!["min(retained_size)", "max(retained_size)"]);
+        assert_eq!(result.rows[0][0], serde_json::json!(1024));
+        assert_eq!(result.rows[0][1], serde_json::json!(4096));
+    }
+
+    #[test]
+    fn test_count_with_where() {
+        let state = build_test_state();
+        let result = state.execute_query("SELECT COUNT(*) FROM instances WHERE retained_size > 1024").unwrap();
+        assert_eq!(result.rows[0][0], serde_json::json!(2)); // HashMap(2048), CacheManager(4096)
+    }
+
+    #[test]
+    fn test_mixed_aggregate_plain_error() {
+        let state = build_test_state();
+        let result = state.execute_query("SELECT class_name, COUNT(*) FROM instances");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_count_star_class_histogram() {
+        let state = build_test_state();
+        let result = state.execute_query("SELECT COUNT(*), SUM(instance_count) FROM class_histogram").unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], serde_json::json!(3)); // 3 histogram entries
+        assert_eq!(result.rows[0][1], serde_json::json!(16)); // 1 + 5 + 10
+    }
+
+    // -- GROUP BY tests --
+
+    #[test]
+    fn test_group_by_with_count() {
+        let state = build_test_state();
+        // Group by node_type in instances — should get "Instance" and "Array" groups
+        let result = state.execute_query(
+            "SELECT node_type, COUNT(*) FROM instances GROUP BY node_type ORDER BY count(*) DESC"
+        ).unwrap();
+        assert!(result.rows.len() >= 2);
+        assert_eq!(result.columns, vec!["node_type", "count(*)"]);
+        // Instance group should have 3 (HashMap, ArrayList, CacheManager), Array has 1 (byte[])
+        assert_eq!(result.rows[0][0], serde_json::json!("Instance"));
+        assert_eq!(result.rows[0][1], serde_json::json!(3));
+    }
+
+    #[test]
+    fn test_group_by_with_sum() {
+        let state = build_test_state();
+        let result = state.execute_query(
+            "SELECT node_type, SUM(retained_size) FROM instances GROUP BY node_type"
+        ).unwrap();
+        assert!(result.rows.len() >= 2);
+    }
+
+    #[test]
+    fn test_group_by_invalid_non_grouped_column() {
+        let state = build_test_state();
+        let result = state.execute_query(
+            "SELECT class_name, COUNT(*) FROM instances GROUP BY node_type"
+        );
+        assert!(result.is_err());
     }
 }
