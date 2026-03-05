@@ -8,6 +8,7 @@ import { HEAP_ANALYSIS_SYSTEM_PROMPT, buildAnalyzePrompt } from './promptTemplat
 import { resolveSource } from './sourceResolver';
 import type { DependencyInfo } from './dependencyResolver';
 import { allHandlers, MessageHandler, EditorState } from './messageHandlers';
+import { friendlyError } from './errorMessages';
 
 /**
  * Custom readonly editor provider for .hprof files.
@@ -30,6 +31,10 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
     private editors = new Map<string, EditorState>();
     /** Tracks the most recently focused editor's hprof path. */
     private activeHprofPath: string | null = null;
+    /** Heartbeat interval handle. */
+    private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+    /** Consecutive heartbeat failures. */
+    private heartbeatFailures = 0;
 
     constructor(
         private readonly context: vscode.ExtensionContext,
@@ -151,6 +156,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                 this.rustClient = null;
             };
             this.outputChannel.appendLine('[HeapLens] Rust server process spawned');
+            this.startHeartbeat();
             return this.rustClient;
         } catch (error: any) {
             this.outputChannel.appendLine(`[HeapLens] ERROR spawning server: ${error.message}`);
@@ -295,7 +301,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                     }
                 } catch (error: any) {
                     this.outputChannel.appendLine(`[HeapLens] ERROR: ${error.message}`);
-                    vscode.window.showErrorMessage(`HeapLens analysis failed: ${error.message}`);
+                    vscode.window.showErrorMessage(`HeapLens: ${friendlyError(error.message)}`);
                 } finally {
                     client.offNotification('heap_analysis_progress');
                     client.offNotification('heap_analysis_complete');
@@ -555,7 +561,43 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         return this.activeHprofPath;
     }
 
+    private startHeartbeat(): void {
+        this.stopHeartbeat();
+        this.heartbeatFailures = 0;
+        this.heartbeatInterval = setInterval(async () => {
+            if (!this.rustClient || this.rustClient.isDisposed) {
+                this.stopHeartbeat();
+                return;
+            }
+            const ok = await this.rustClient.ping(5000);
+            if (ok) {
+                this.heartbeatFailures = 0;
+            } else {
+                this.heartbeatFailures++;
+                this.outputChannel.appendLine(`[HeapLens] Heartbeat failure #${this.heartbeatFailures}`);
+                if (this.heartbeatFailures >= 3) {
+                    this.outputChannel.appendLine('[HeapLens] 3 consecutive heartbeat failures — treating as crash');
+                    this.stopHeartbeat();
+                    for (const [, state] of this.editors) {
+                        if (state.webviewReady) {
+                            state.webviewPanel.webview.postMessage({ command: 'serverCrashed' });
+                        }
+                    }
+                    this.rustClient = null;
+                }
+            }
+        }, 15000);
+    }
+
+    private stopHeartbeat(): void {
+        if (this.heartbeatInterval) {
+            clearInterval(this.heartbeatInterval);
+            this.heartbeatInterval = null;
+        }
+    }
+
     public dispose(): void {
+        this.stopHeartbeat();
         if (this.rustClient) {
             this.rustClient.dispose();
             this.rustClient = null;

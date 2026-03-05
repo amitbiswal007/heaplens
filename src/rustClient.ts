@@ -266,6 +266,19 @@ export class RustClient {
     }
 
     /**
+     * Sends a lightweight ping to check if the server is responsive.
+     * Returns true if the server responds within the timeout, false otherwise.
+     */
+    public async ping(timeoutMs = 5000): Promise<boolean> {
+        try {
+            await this.sendRequest('ping', {}, timeoutMs);
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
      * Shuts down the client and cleans up resources.
      */
     private shutdown(error: Error | null): void {
