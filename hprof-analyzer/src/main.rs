@@ -156,6 +156,22 @@ fn analyze_heap_internal(
                 graph.node_count(),
                 graph.edge_count());
 
+    // Emit partial progress notification so the UI can show summary stats immediately.
+    // This fires before the slow dominator tree computation, letting the Overview tab
+    // render the stats bar while retained sizes are still being computed.
+    let progress_summary = graph.summary().clone();
+    let progress_notification = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "heap_analysis_progress",
+        "params": {
+            "stage": "graph_built",
+            "summary": progress_summary
+        }
+    });
+    if let Err(e) = send_stdout(&progress_notification) {
+        eprintln!("[Progress] Failed to send progress notification: {}", e);
+    }
+
     // Step 3: Calculate dominators and retained sizes with state
     eprintln!("[Progress] Step 3/3: Calculating dominators and retained sizes...");
     let (top_objects, analysis_state) = calculate_dominators_with_state(graph, waste_data)

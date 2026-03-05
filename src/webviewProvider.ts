@@ -29,15 +29,15 @@ import { getCompareJs } from './webview/js/compare';
  * 8. Compare — baseline comparison with delta charts
  * 9. AI Chat — LLM-powered heap analysis Q&A
  */
-export function getWebviewContent(_webview: vscode.Webview): string {
-    const d3Uri = 'https://d3js.org/d3.v7.min.js';
+export function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): string {
+    const d3Uri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'd3.v7.min.js'));
 
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://d3js.org; style-src 'unsafe-inline';">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' ${webview.cspSource}; style-src 'unsafe-inline';">
     <title>HeapLens</title>
     <style>
 ${getStyles()}

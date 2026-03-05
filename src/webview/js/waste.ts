@@ -62,7 +62,7 @@ export function getWasteJs(): string {
         }
 
         // ---- Self-register ----
-        onMessage('analysisComplete', function(msg) {
+        onTabMessage('waste', 'analysisComplete', function(msg) {
             renderWaste(msg.wasteAnalysis);
         });
     `;

@@ -72,7 +72,7 @@ export function getHistogramJs(): string {
         }
 
         // ---- Self-register ----
-        onMessage('analysisComplete', function(msg) {
+        onTabMessage('histogram', 'analysisComplete', function(msg) {
             renderHistogram(msg.classHistogram || []);
         });
 

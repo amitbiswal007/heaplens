@@ -73,7 +73,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         this.outputChannel.appendLine(`[HeapLens] Opening HPROF file: ${hprofPath}`);
         this.outputChannel.appendLine(`[HeapLens] File exists: ${fs.existsSync(hprofPath)}`);
 
-        webviewPanel.webview.html = getWebviewContent(webviewPanel.webview);
+        webviewPanel.webview.html = getWebviewContent(webviewPanel.webview, this.context.extensionUri);
 
         // Ensure Rust client is running
         const client = this.getOrCreateClient();
@@ -154,6 +154,19 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
     ): Promise<void> {
         let resolveAnalysis: (() => void) | null = null;
         const analysisPromise = new Promise<void>((resolve) => { resolveAnalysis = resolve; });
+
+        // Progressive streaming: show summary stats in the Overview tab immediately
+        // after graph building, before the slow dominator tree computation finishes.
+        client.onNotification('heap_analysis_progress', (params: any) => {
+            const state = this.editors.get(hprofPath);
+            if (params.stage === 'graph_built' && params.summary) {
+                this.outputChannel.appendLine('[HeapLens] Graph built — streaming partial summary to webview');
+                const progressMsg = { command: 'analysisProgress', summary: params.summary };
+                if (state?.webviewReady) {
+                    webviewPanel.webview.postMessage(progressMsg);
+                }
+            }
+        });
 
         client.onNotification('heap_analysis_complete', (params: any) => {
             resolveAnalysis?.();
@@ -240,6 +253,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                     this.outputChannel.appendLine(`[HeapLens] ERROR: ${error.message}`);
                     vscode.window.showErrorMessage(`HeapLens analysis failed: ${error.message}`);
                 } finally {
+                    client.offNotification('heap_analysis_progress');
                     client.offNotification('heap_analysis_complete');
                 }
             }

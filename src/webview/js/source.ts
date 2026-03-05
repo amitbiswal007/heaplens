@@ -128,7 +128,7 @@ export function getSourceJs(): string {
         }
 
         // ---- Self-register ----
-        onMessage('analysisComplete', function(msg) {
+        onTabMessage('source', 'analysisComplete', function(msg) {
             renderSourceTab(msg.classHistogram || []);
         });
 

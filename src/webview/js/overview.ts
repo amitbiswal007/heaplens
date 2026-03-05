@@ -226,6 +226,21 @@ export function getOverviewJs(): string {
         }
 
         // ---- Self-register ----
+        // Partial progress: show summary stats immediately after graph building,
+        // before dominator tree computation completes.
+        onMessage('analysisProgress', function(msg) {
+            var s = msg.summary;
+            if (!s) return;
+            document.getElementById('stats-bar').innerHTML = [
+                { label: 'Reachable Heap', value: fmt(s.reachable_heap_size || s.total_heap_size) },
+                { label: 'Total Heap', value: fmt(s.total_heap_size) },
+                { label: 'Objects', value: fmtNum(s.total_instances) },
+                { label: 'Classes', value: fmtNum(s.total_classes) },
+                { label: 'Arrays', value: fmtNum(s.total_arrays) },
+                { label: 'GC Roots', value: fmtNum(s.total_gc_roots) }
+            ].map(function(c) { return '<div class="stat-card"><div class="label">' + c.label + '</div><div class="value">' + c.value + '</div></div>'; }).join('');
+        });
+
         onMessage('analysisComplete', function(msg) {
             renderOverview(msg);
         });

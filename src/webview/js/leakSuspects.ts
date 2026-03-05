@@ -78,7 +78,7 @@ export function getLeakSuspectsJs(): string {
         }
 
         // ---- Self-register ----
-        onMessage('analysisComplete', function(msg) {
+        onTabMessage('leaks', 'analysisComplete', function(msg) {
             renderLeakSuspects(msg.leakSuspects || []);
         });
 

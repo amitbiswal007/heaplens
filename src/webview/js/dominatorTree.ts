@@ -128,7 +128,7 @@ export function getDominatorTreeJs(): string {
         }
 
         // ---- Self-register ----
-        onMessage('analysisComplete', function(msg) {
+        onTabMessage('domtree', 'analysisComplete', function(msg) {
             renderDominatorTree(msg.topLayers || []);
         });
 
