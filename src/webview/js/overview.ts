@@ -35,7 +35,7 @@ export function getOverviewJs(): string {
             if (typeof d3 === 'undefined' || objs.length === 0) return;
             var container = document.getElementById('pie-chart');
             container.innerHTML = '';
-            var w = 500, h = 350;
+            var w = container.clientWidth || 500, h = 350;
 
             var svg = d3.select(container).append('svg').attr('width', w).attr('height', h);
             var color = d3.scaleOrdinal(d3.schemeTableau10);
@@ -98,7 +98,7 @@ export function getOverviewJs(): string {
             var maxVal = d3.max(items, function(d) { return d.retained_size; }) || 1;
             var margin = { top: 10, right: 80, bottom: 10, left: 200 };
             var barH = 22, gap = 4;
-            var w = 500, h = items.length * (barH + gap) + margin.top + margin.bottom;
+            var w = container.clientWidth || 500, h = items.length * (barH + gap) + margin.top + margin.bottom;
 
             var titleDiv = document.createElement('div');
             titleDiv.className = 'section-title';
@@ -225,6 +225,29 @@ export function getOverviewJs(): string {
             section.innerHTML = html;
         }
 
+        // ---- Responsive chart resize ----
+        var _overviewLastObjs = null;
+        var _overviewResizeTimer = null;
+
+        function _overviewOnResize() {
+            if (_overviewResizeTimer) clearTimeout(_overviewResizeTimer);
+            _overviewResizeTimer = setTimeout(function() {
+                _overviewResizeTimer = null;
+                if (_overviewLastObjs && _overviewLastObjs.length > 0) {
+                    renderTreemap(_overviewLastObjs);
+                    renderBarChart(_overviewLastObjs);
+                }
+            }, 100);
+        }
+
+        if (typeof ResizeObserver !== 'undefined') {
+            var _chartObserver = new ResizeObserver(_overviewOnResize);
+            var _pieEl = document.getElementById('pie-chart');
+            var _barEl = document.getElementById('bar-chart');
+            if (_pieEl) _chartObserver.observe(_pieEl);
+            if (_barEl) _chartObserver.observe(_barEl);
+        }
+
         // ---- Self-register ----
         // Partial progress: show summary stats immediately after graph building,
         // before dominator tree computation completes.
@@ -243,6 +266,8 @@ export function getOverviewJs(): string {
 
         onMessage('analysisComplete', function(msg) {
             renderOverview(msg);
+            // Cache filtered objects for resize re-renders
+            _overviewLastObjs = (msg.topObjects || []).filter(function(o) { return o.node_type !== 'Class' && o.node_type !== 'SuperRoot' && o.retained_size > 0; }).slice(0, 10);
         });
 
         onMessage('reportCopied', function() {
