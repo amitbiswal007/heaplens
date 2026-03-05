@@ -134,18 +134,49 @@ fn analyze_heap_internal(
     path: &PathBuf,
     analysis_states: Arc<RwLock<HashMap<PathBuf, FileAnalysisState>>>,
 ) -> Result<(Vec<hprof_analyzer::ObjectReport>, Arc<hprof_analyzer::AnalysisState>)> {
-    // Step 1: Load and map the HPROF file
-    eprintln!("[Progress] Step 1/3: Loading HPROF file...");
+    // Phase 1/4: Load and map the HPROF file
+    eprintln!("[Progress] Step 1/4: Loading HPROF file...");
     let loader = HprofLoader::new(path.clone());
     let mmap = loader.map_file()
         .with_context(|| format!("Failed to load HPROF file: {:?}", path))?;
 
-    let file_size_mb = mmap.len() as f64 / (1024.0 * 1024.0);
+    let file_size = mmap.len() as u64;
+    let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
     eprintln!("[Progress] HPROF file mapped: {:.2} MB", file_size_mb);
     log::info!("HPROF file mapped: {} bytes ({:.2} MB)", mmap.len(), file_size_mb);
 
-    // Step 2: Build the heap graph
-    eprintln!("[Progress] Step 2/3: Building heap graph (this may take a while for large files)...");
+    // Send loading progress with file metadata
+    let loading_notification = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "heap_analysis_progress",
+        "params": {
+            "stage": "loading",
+            "phase": 1,
+            "total_phases": 4,
+            "file_metadata": {
+                "file_size": file_size
+            }
+        }
+    });
+    if let Err(e) = send_stdout(&loading_notification) {
+        eprintln!("[Progress] Failed to send loading notification: {}", e);
+    }
+
+    // Phase 2/4: Build the heap graph
+    eprintln!("[Progress] Step 2/4: Building heap graph...");
+    let graph_building_notification = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "heap_analysis_progress",
+        "params": {
+            "stage": "graph_building",
+            "phase": 2,
+            "total_phases": 4
+        }
+    });
+    if let Err(e) = send_stdout(&graph_building_notification) {
+        eprintln!("[Progress] Failed to send graph_building notification: {}", e);
+    }
+
     let (graph, waste_data) = build_graph(&mmap[..])
         .context("Failed to build heap graph")?;
 
@@ -156,15 +187,15 @@ fn analyze_heap_internal(
                 graph.node_count(),
                 graph.edge_count());
 
-    // Emit partial progress notification so the UI can show summary stats immediately.
-    // This fires before the slow dominator tree computation, letting the Overview tab
-    // render the stats bar while retained sizes are still being computed.
+    // Phase 3/4: Graph built — emit summary stats for early rendering
     let progress_summary = graph.summary().clone();
     let progress_notification = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "heap_analysis_progress",
         "params": {
             "stage": "graph_built",
+            "phase": 3,
+            "total_phases": 4,
             "summary": progress_summary
         }
     });
@@ -172,8 +203,21 @@ fn analyze_heap_internal(
         eprintln!("[Progress] Failed to send progress notification: {}", e);
     }
 
-    // Step 3: Calculate dominators and retained sizes with state
-    eprintln!("[Progress] Step 3/3: Calculating dominators and retained sizes...");
+    // Phase 4/4: Calculate dominators and retained sizes
+    eprintln!("[Progress] Step 4/4: Calculating dominators and retained sizes...");
+    let dominators_notification = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "heap_analysis_progress",
+        "params": {
+            "stage": "dominators",
+            "phase": 4,
+            "total_phases": 4
+        }
+    });
+    if let Err(e) = send_stdout(&dominators_notification) {
+        eprintln!("[Progress] Failed to send dominators notification: {}", e);
+    }
+
     let (top_objects, analysis_state) = calculate_dominators_with_state(graph, waste_data)
         .context("Failed to calculate dominators")?;
 

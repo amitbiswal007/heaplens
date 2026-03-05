@@ -948,6 +948,65 @@ export function getStyles(): string {
         .compare-leak-card.resolved { border-left-color: var(--vscode-testing-iconPassed, #388a34); }
         .compare-leak-card.persisted { border-left-color: var(--vscode-editorWarning-foreground); }
 
+        /* Progress bar */
+        .progress-bar-container {
+            padding: var(--hl-space-md) var(--hl-space-lg);
+            margin-bottom: var(--hl-space-md);
+        }
+        .progress-steps {
+            display: flex;
+            align-items: center;
+            gap: 0;
+        }
+        .progress-step {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .progress-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: var(--vscode-panel-border);
+            flex-shrink: 0;
+            transition: background 0.3s;
+        }
+        .progress-step.active .progress-dot {
+            background: var(--vscode-focusBorder);
+            box-shadow: 0 0 6px var(--vscode-focusBorder);
+            animation: pulse 1s infinite;
+        }
+        .progress-step.done .progress-dot {
+            background: var(--vscode-testing-iconPassed, #388a34);
+        }
+        .progress-connector {
+            width: 24px;
+            height: 2px;
+            background: var(--vscode-panel-border);
+            flex-shrink: 0;
+        }
+        .progress-connector.done {
+            background: var(--vscode-testing-iconPassed, #388a34);
+        }
+        .progress-label {
+            font-size: 12px;
+            opacity: 0.8;
+            white-space: nowrap;
+        }
+
+        /* File metadata */
+        .file-metadata {
+            display: flex;
+            gap: var(--hl-space-md);
+            padding: var(--hl-space-xs) var(--hl-space-lg);
+            margin-bottom: var(--hl-space-sm);
+            font-size: 12px;
+            opacity: 0.6;
+        }
+        .file-meta-item {
+            white-space: nowrap;
+        }
+
         .waste-preview {
             max-width: 400px;
             overflow: hidden;

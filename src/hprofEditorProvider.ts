@@ -155,17 +155,39 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         let resolveAnalysis: (() => void) | null = null;
         const analysisPromise = new Promise<void>((resolve) => { resolveAnalysis = resolve; });
 
-        // Progressive streaming: show summary stats in the Overview tab immediately
-        // after graph building, before the slow dominator tree computation finishes.
+        const phaseMessages: Record<string, string> = {
+            loading: 'Loading file...',
+            graph_building: 'Building heap graph...',
+            graph_built: 'Graph built, preparing...',
+            dominators: 'Computing dominator tree...'
+        };
+        let lastPhase = 0;
+        let progressRef: vscode.Progress<{ increment?: number; message?: string }> | null = null;
+
+        // Single handler for progress: forwards to webview + drives VS Code progress bar
         client.onNotification('heap_analysis_progress', (params: any) => {
             const state = this.editors.get(hprofPath);
-            if (params.stage === 'graph_built' && params.summary) {
-                this.outputChannel.appendLine('[HeapLens] Graph built — streaming partial summary to webview');
-                const progressMsg = { command: 'analysisProgress', summary: params.summary };
-                if (state?.webviewReady) {
-                    webviewPanel.webview.postMessage(progressMsg);
-                }
+            this.outputChannel.appendLine(`[HeapLens] Progress: stage=${params.stage}, phase=${params.phase}/${params.total_phases}`);
+
+            // Forward to webview
+            const progressMsg: any = {
+                command: 'analysisProgress',
+                stage: params.stage,
+                phase: params.phase,
+                totalPhases: params.total_phases
+            };
+            if (params.summary) { progressMsg.summary = params.summary; }
+            if (params.file_metadata) { progressMsg.fileMetadata = params.file_metadata; }
+            if (state?.webviewReady) {
+                webviewPanel.webview.postMessage(progressMsg);
             }
+
+            // Drive VS Code notification progress
+            const phase = params.phase || 0;
+            const msg = phaseMessages[params.stage] || 'Analyzing...';
+            const increment = Math.max(0, (phase - lastPhase) * 25);
+            lastPhase = phase;
+            progressRef?.report({ increment, message: msg });
         });
 
         client.onNotification('heap_analysis_complete', (params: any) => {
@@ -223,7 +245,8 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                 cancellable: false
             },
             async (progress) => {
-                progress.report({ increment: 0, message: 'Starting analysis...' });
+                progressRef = progress;
+                progress.report({ message: 'Starting analysis...' });
 
                 try {
                     this.outputChannel.appendLine('[HeapLens] Awaiting analyze_heap response...');
@@ -231,7 +254,6 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                     this.outputChannel.appendLine(`[HeapLens] Got response: ${JSON.stringify(response)}`);
 
                     if (response.status === 'processing') {
-                        progress.report({ increment: 30, message: 'Building heap graph...' });
                         this.outputChannel.appendLine('[HeapLens] Status=processing, waiting for notification...');
 
                         const startTime = Date.now();

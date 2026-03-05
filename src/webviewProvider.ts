@@ -14,6 +14,7 @@ import { getGcPathJs } from './webview/js/gcPath';
 import { getInspectorJs } from './webview/js/inspector';
 import { getQueryJs } from './webview/js/query';
 import { getCompareJs } from './webview/js/compare';
+import { getProgressJs } from './webview/js/progress';
 
 /**
  * Returns the HTML content for the HeapLens tabbed webview.
@@ -67,6 +68,7 @@ ${getGcPathJs()}
 ${getInspectorJs()}
 ${getQueryJs()}
 ${getCompareJs()}
+${getProgressJs()}
 
         // Store analysisData for tabs that re-render on filter/sort/reset
         onMessage('analysisComplete', function(msg) {

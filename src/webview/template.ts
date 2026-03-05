@@ -14,6 +14,8 @@ export function getHtmlTemplate(): string {
 
     <!-- Tab 1: Overview -->
     <div id="tab-overview" class="tab-content active">
+        <div id="file-metadata" class="file-metadata" style="display:none;"></div>
+        <div id="progress-bar" class="progress-bar-container" style="display:none;"></div>
         <div class="stats-bar" id="stats-bar">
             <div class="loading">Waiting for analysis...</div>
         </div>
