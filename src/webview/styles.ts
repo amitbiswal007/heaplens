@@ -240,7 +240,8 @@ export function getStyles(): string {
         }
 
         /* Charts */
-        #pie-chart { width: 100%; max-width: 500px; margin: 20px auto; }
+        #pie-chart { width: 100%; margin: 20px auto; }
+        #bar-chart { width: 100%; margin: 20px auto; }
         #sunburst-chart { width: 100%; display: flex; justify-content: center; margin-top: 16px; }
 
         /* AI Chat tab */
