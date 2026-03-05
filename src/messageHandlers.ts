@@ -361,6 +361,21 @@ const readyHandler: MessageHandler = {
     }
 };
 
+const exportHistogramCsvHandler: MessageHandler = {
+    command: 'exportHistogramCsv',
+    async handle(message, ctx) {
+        const uri = await vscode.window.showSaveDialog({
+            defaultUri: vscode.Uri.file('histogram.csv'),
+            filters: { 'CSV': ['csv'] }
+        });
+        if (uri) {
+            const encoder = new TextEncoder();
+            await vscode.workspace.fs.writeFile(uri, encoder.encode(message.csv));
+            ctx.outputChannel.appendLine(`[HeapLens] Histogram CSV exported to: ${uri.fsPath}`);
+        }
+    }
+};
+
 const cancelAnalysisHandler: MessageHandler = {
     command: 'cancelAnalysis',
     async handle(message, ctx) {
@@ -412,4 +427,5 @@ export const allHandlers: MessageHandler[] = [
     readyHandler,
     cancelAnalysisHandler,
     retryAnalysisHandler,
+    exportHistogramCsvHandler,
 ];
