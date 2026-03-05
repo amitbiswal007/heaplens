@@ -148,6 +148,16 @@ export function getStyles(): string {
         .tree-bar { height: 4px; border-radius: 2px; background: var(--vscode-progressBar-background); min-width: 1px; }
         .tree-pct { min-width: 50px; text-align: right; opacity: 0.6; font-size: 12px; }
         .tree-children { padding-left: 20px; }
+        .tree-row.leaf { opacity: 0.8; }
+        .tree-row.leaf .tree-toggle { opacity: 0.3; }
+        .tree-show-more {
+            padding: 6px 12px;
+            font-size: 12px;
+            color: var(--vscode-textLink-foreground);
+            cursor: pointer;
+            opacity: 0.8;
+        }
+        .tree-show-more:hover { opacity: 1; text-decoration: underline; }
         .tree-source {
             margin-left: 6px;
             flex-shrink: 0;
@@ -217,6 +227,17 @@ export function getStyles(): string {
             margin-left: 8px;
         }
         .go-to-source-link:hover { text-decoration: underline; }
+        .leak-pagination {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 0;
+            justify-content: center;
+        }
+        .leak-page-info {
+            font-size: 12px;
+            opacity: 0.7;
+        }
 
         /* Charts */
         #pie-chart { width: 100%; max-width: 500px; margin: 20px auto; }

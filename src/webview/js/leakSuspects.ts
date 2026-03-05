@@ -1,18 +1,33 @@
 export function getLeakSuspectsJs(): string {
     return `
         // ---- Tab 4: Leak Suspects ----
-        // Self-contained: owns explain-leak streaming buffers + rendering.
+        // Self-contained: owns explain-leak streaming buffers, rendering, pagination.
 
         var _explainLeakBuffers = {};
+        var _leakPage = 0;
+        var LEAK_PAGE_SIZE = 10;
+        var _leakSuspectsData = [];
 
         function renderLeakSuspects(suspects) {
+            _leakSuspectsData = suspects || [];
+            _leakPage = 0;
+            renderLeakPage();
+        }
+
+        function renderLeakPage() {
             var container = document.getElementById('leak-suspects');
+            var suspects = _leakSuspectsData;
+
             if (!suspects || suspects.length === 0) {
                 container.innerHTML = '<div class="loading">No leak suspects detected (no single object or class retains >10% of heap)</div>';
                 return;
             }
 
-            container.innerHTML = suspects.map(function(s) {
+            var totalPages = Math.ceil(suspects.length / LEAK_PAGE_SIZE);
+            var start = _leakPage * LEAK_PAGE_SIZE;
+            var pageSuspects = suspects.slice(start, start + LEAK_PAGE_SIZE);
+
+            var html = pageSuspects.map(function(s) {
                 var severity = s.retained_percentage > 30 ? 'high' : 'medium';
                 var sourceLink = isResolvableClass(s.class_name)
                     ? ' | <a class="go-to-source-link" data-class="' + escapeHtml(s.class_name) + '">View Source</a>'
@@ -40,6 +55,23 @@ export function getLeakSuspectsJs(): string {
                     '<div class="suspect-explain-area" id="explain-' + sanitizedId + '"></div>' +
                     '</div>';
             }).join('');
+
+            // Pagination controls
+            if (totalPages > 1) {
+                html += '<div class="leak-pagination">';
+                html += '<button class="btn leak-prev-btn"' + (_leakPage === 0 ? ' disabled' : '') + '>Prev</button>';
+                html += '<span class="leak-page-info">Page ' + (_leakPage + 1) + ' of ' + totalPages + '</span>';
+                html += '<button class="btn leak-next-btn"' + (_leakPage >= totalPages - 1 ? ' disabled' : '') + '>Next</button>';
+                html += '</div>';
+            }
+
+            container.innerHTML = html;
+
+            // Wire up pagination
+            var prevBtn = container.querySelector('.leak-prev-btn');
+            var nextBtn = container.querySelector('.leak-next-btn');
+            if (prevBtn) prevBtn.addEventListener('click', function() { if (_leakPage > 0) { _leakPage--; renderLeakPage(); } });
+            if (nextBtn) nextBtn.addEventListener('click', function() { var tp = Math.ceil(_leakSuspectsData.length / LEAK_PAGE_SIZE); if (_leakPage < tp - 1) { _leakPage++; renderLeakPage(); } });
 
             container.querySelectorAll('.go-to-source-link').forEach(function(link) {
                 link.addEventListener('click', function(e) {

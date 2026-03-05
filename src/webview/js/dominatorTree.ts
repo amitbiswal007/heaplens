@@ -2,9 +2,11 @@ export function getDominatorTreeJs(): string {
     return `
         // ---- Tab 3: Dominator Tree ----
         // Self-contained: owns tree state + expand/collapse + rendering.
+        // Sibling cap: shows 50 at a time with "Show more" button.
 
         var _treeData = [];
         var _totalRetained = 0;
+        var TREE_SIBLING_CAP = 50;
         var PRIMITIVE_ARRAYS = ['byte[]', 'short[]', 'int[]', 'long[]', 'float[]', 'double[]', 'char[]', 'boolean[]'];
 
         function isLeafType(obj) {
@@ -20,13 +22,42 @@ export function getDominatorTreeJs(): string {
 
             var container = document.getElementById('dominator-tree');
             container.innerHTML = '';
-            _treeData.forEach(function(obj) { container.appendChild(createTreeRow(obj, 0)); });
+            appendCappedChildren(container, _treeData, 0);
+        }
+
+        function appendCappedChildren(container, children, depth) {
+            var visible = children.slice(0, TREE_SIBLING_CAP);
+            var remaining = children.length - TREE_SIBLING_CAP;
+
+            visible.forEach(function(obj) { container.appendChild(createTreeRow(obj, depth)); });
+
+            if (remaining > 0) {
+                appendShowMoreButton(container, children, TREE_SIBLING_CAP, depth);
+            }
+        }
+
+        function appendShowMoreButton(container, allChildren, startIdx, depth) {
+            var remaining = allChildren.length - startIdx;
+            var btn = document.createElement('div');
+            btn.className = 'tree-show-more';
+            btn.style.paddingLeft = (12 + depth * 20) + 'px';
+            btn.textContent = 'Show ' + Math.min(TREE_SIBLING_CAP, remaining) + ' more... (' + remaining + ' remaining)';
+            btn.addEventListener('click', function() {
+                btn.remove();
+                var nextBatch = allChildren.slice(startIdx, startIdx + TREE_SIBLING_CAP);
+                nextBatch.forEach(function(obj) { container.appendChild(createTreeRow(obj, depth)); });
+                var newRemaining = allChildren.length - (startIdx + TREE_SIBLING_CAP);
+                if (newRemaining > 0) {
+                    appendShowMoreButton(container, allChildren, startIdx + TREE_SIBLING_CAP, depth);
+                }
+            });
+            container.appendChild(btn);
         }
 
         function createTreeRow(obj, depth) {
             var leaf = isLeafType(obj);
             var row = document.createElement('div');
-            row.className = 'tree-row' + (leaf ? '' : ' expandable');
+            row.className = 'tree-row' + (leaf ? ' leaf' : ' expandable');
             row.style.paddingLeft = (12 + depth * 20) + 'px';
             row.dataset.objectId = obj.object_id;
             row.dataset.depth = depth;
@@ -108,13 +139,14 @@ export function getDominatorTreeJs(): string {
                 if (filtered.length === 0) {
                     toggle.textContent = '\\u00B7';
                     row.classList.remove('expandable');
+                    row.classList.add('leaf');
                     return;
                 }
 
                 toggle.textContent = '\\u25BC';
                 var childContainer = document.createElement('div');
                 childContainer.className = 'tree-children';
-                filtered.forEach(function(child) { childContainer.appendChild(createTreeRow(child, depth)); });
+                appendCappedChildren(childContainer, filtered, depth);
                 row.after(childContainer);
             });
         }
@@ -124,6 +156,7 @@ export function getDominatorTreeJs(): string {
             rows.forEach(function(row) {
                 row.querySelector('.tree-toggle').textContent = '\\u00B7';
                 row.classList.remove('expandable');
+                row.classList.add('leaf');
             });
         }
 
