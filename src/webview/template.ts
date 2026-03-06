@@ -69,6 +69,10 @@ export function getHtmlTemplate(): string {
         <div id="waste-dup-table"></div>
         <div class="waste-section-title" id="waste-empty-title" style="display:none;">Empty Collections</div>
         <div id="waste-empty-table"></div>
+        <div class="waste-section-title" id="waste-overalloc-title" style="display:none;">Over-Allocated Collections</div>
+        <div id="waste-overalloc-table"></div>
+        <div class="waste-section-title" id="waste-boxed-title" style="display:none;">Boxed Primitives</div>
+        <div id="waste-boxed-table"></div>
     </div>
 
     <!-- Tab 6: Source -->
