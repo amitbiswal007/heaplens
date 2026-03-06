@@ -384,6 +384,63 @@ export function getStyles(): string {
             opacity: 0.6;
         }
         .chat-clear:hover { opacity: 1; }
+        /* Chat HeapQL integration */
+        .chat-run-query-btn {
+            display: inline-block;
+            margin: 4px 0 8px;
+            padding: 4px 12px;
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 11px;
+        }
+        .chat-run-query-btn:hover { background: var(--vscode-button-hoverBackground); }
+        .chat-run-query-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .chat-query-result {
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 4px;
+            margin: 4px 0 8px;
+            overflow-x: auto;
+        }
+        .chat-query-result table {
+            width: 100%;
+            border-collapse: collapse;
+            font-family: var(--vscode-editor-font-family, monospace);
+            font-size: 11px;
+        }
+        .chat-query-result th {
+            text-align: left;
+            padding: 4px 8px;
+            border-bottom: 1px solid var(--vscode-panel-border);
+            font-weight: 600;
+            font-size: 10px;
+            opacity: 0.7;
+        }
+        .chat-query-result td {
+            padding: 3px 8px;
+            border-bottom: 1px solid var(--vscode-panel-border);
+        }
+        .chat-query-result tr:hover { background: var(--vscode-list-hoverBackground); }
+        .chat-query-status {
+            text-align: right;
+            padding: 4px 8px;
+            font-size: 10px;
+            opacity: 0.5;
+        }
+        .chat-query-more {
+            text-align: center;
+            padding: 6px 8px;
+            font-size: 11px;
+            opacity: 0.6;
+        }
+        .chat-query-link {
+            color: var(--vscode-textLink-foreground, #3794ff);
+            cursor: pointer;
+            text-decoration: none;
+        }
+        .chat-query-link:hover { text-decoration: underline; }
         .chat-placeholder {
             text-align: center;
             opacity: 0.5;

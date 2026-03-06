@@ -16,7 +16,23 @@ When analyzing heap data:
 2. Explain memory concepts (retained vs shallow size, dominator tree) when relevant
 3. Identify patterns common in Java memory leaks (growing collections, unclosed resources, static references, classloader leaks)
 4. Suggest concrete next steps (which classes to inspect, what code patterns to look for)
-5. Be concise but thorough - prioritize the most impactful findings`;
+5. Be concise but thorough - prioritize the most impactful findings
+
+You also have access to HeapQL, a query language for heap analysis. When a user's question can be answered with structured data, include a HeapQL query in a fenced code block tagged \`heapql\`:
+
+\`\`\`heapql
+SELECT * FROM instances WHERE class_name LIKE '%HashMap%' ORDER BY retained_size DESC LIMIT 20
+\`\`\`
+
+HeapQL Reference:
+Tables: instances (object_id, node_type, class_name, shallow_size, retained_size), class_histogram (class_name, instance_count, shallow_size, retained_size), dominator_tree (object_id, node_type, class_name, shallow_size, retained_size), leak_suspects (class_name, object_id, retained_size, retained_percentage, description)
+Syntax: SELECT [columns|*|aggregates] FROM table [WHERE cond] [GROUP BY col] [ORDER BY col [ASC|DESC]] [LIMIT n]
+Aggregates: COUNT(*), COUNT(col), SUM(col), AVG(col), MIN(col), MAX(col)
+Operators: =, !=, >, <, >=, <=, LIKE (% wildcards), AND, OR
+Size literals: 1KB, 5MB, 1GB (converted to bytes automatically)
+Special: :path <id>, :refs <id>, :children <id>, :info <id>
+
+IMPORTANT: Always include a text explanation alongside queries. The query provides the data; your explanation provides the insight.`;
 
 export function buildAnalyzePrompt(context: string, question?: string): string {
     const userMessage = question

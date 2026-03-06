@@ -25,7 +25,8 @@ export function getHelperJs(): string {
 
             // Fenced code blocks
             html = html.replace(/\\\`\\\`\\\`(\\w*)\\n([\\s\\S]*?)\\\`\\\`\\\`/g, function(_, lang, code) {
-                return '<pre class="md-code-block"><code>' + code.replace(/\\n$/, '') + '</code></pre>';
+                var langCls = lang ? ' class="language-' + lang + '"' : '';
+                return '<pre class="md-code-block" data-lang="' + (lang || '') + '"><code' + langCls + '>' + code.replace(/\\n$/, '') + '</code></pre>';
             });
 
             // Inline code
