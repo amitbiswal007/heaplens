@@ -9,6 +9,7 @@ export function getChatJs(): string {
         var _chatPlaceholder = document.getElementById('chat-placeholder');
         var _currentBubble = null;
         var _isChatStreaming = false;
+        var _chatStreamBuffer = '';
 
         function addChatBubble(role, text) {
             if (_chatPlaceholder) _chatPlaceholder.style.display = 'none';
@@ -27,6 +28,7 @@ export function getChatJs(): string {
             _chatInput.value = '';
             _chatInput.style.height = 'auto';
             _currentBubble = addChatBubble('assistant', '');
+            _chatStreamBuffer = '';
             _isChatStreaming = true;
             _chatSend.disabled = true;
             vscode.postMessage({ command: 'chatMessage', text: text });
@@ -44,21 +46,28 @@ export function getChatJs(): string {
         // ---- Self-register ----
         onMessage('chatChunk', function(msg) {
             if (_currentBubble) {
-                _currentBubble.textContent += msg.text;
+                _chatStreamBuffer += msg.text;
+                _currentBubble.textContent = _chatStreamBuffer;
                 _chatMessages.scrollTop = _chatMessages.scrollHeight;
             }
         });
 
         onMessage('chatDone', function() {
+            if (_currentBubble && _chatStreamBuffer) {
+                _currentBubble.innerHTML = renderMarkdown(_chatStreamBuffer);
+                _currentBubble.classList.add('rendered');
+            }
             _isChatStreaming = false;
             _chatSend.disabled = false;
             _currentBubble = null;
+            _chatStreamBuffer = '';
         });
 
         onMessage('chatError', function(msg) {
             _isChatStreaming = false;
             _chatSend.disabled = false;
             _currentBubble = null;
+            _chatStreamBuffer = '';
             addChatBubble('error', msg.message || 'An error occurred');
         });
     `;

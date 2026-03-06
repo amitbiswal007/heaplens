@@ -283,6 +283,40 @@ export function getStyles(): string {
             margin-right: auto;
             border-bottom-left-radius: 2px;
         }
+        .chat-bubble.rendered {
+            white-space: normal;
+        }
+        .chat-bubble.rendered p {
+            margin: 0 0 8px 0;
+        }
+        .chat-bubble.rendered p:last-child {
+            margin-bottom: 0;
+        }
+        .chat-bubble.rendered pre.md-code-block {
+            background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.2));
+            padding: 8px 10px;
+            border-radius: 4px;
+            overflow-x: auto;
+            margin: 6px 0;
+            font-size: 12px;
+        }
+        .chat-bubble.rendered code.md-inline-code {
+            background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.2));
+            padding: 1px 4px;
+            border-radius: 3px;
+            font-size: 12px;
+        }
+        .chat-bubble.rendered .md-h1,
+        .chat-bubble.rendered .md-h2,
+        .chat-bubble.rendered .md-h3 {
+            font-weight: bold;
+            margin: 8px 0 4px 0;
+        }
+        .chat-bubble.rendered .md-h1 { font-size: 16px; }
+        .chat-bubble.rendered .md-h2 { font-size: 14px; }
+        .chat-bubble.rendered .md-li {
+            margin: 2px 0 2px 12px;
+        }
         .chat-input-row {
             display: flex;
             gap: 8px;
