@@ -15,7 +15,8 @@ export function getStyles(): string {
             font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, sans-serif);
             color: var(--vscode-foreground);
             background: var(--vscode-editor-background);
-            overflow-x: hidden;
+            overflow-x: auto;
+            min-width: 480px;
         }
 
         /* Tab bar */
@@ -26,8 +27,12 @@ export function getStyles(): string {
             position: sticky;
             top: 0;
             z-index: 100;
+            overflow-x: auto;
+            min-width: 0;
+            flex-shrink: 0;
         }
         .tab-btn {
+            flex-shrink: 0;
             padding: 10px 20px;
             border: none;
             background: transparent;
