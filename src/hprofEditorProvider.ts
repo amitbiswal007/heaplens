@@ -4,7 +4,7 @@ import { RustClient } from './rustClient';
 import { getWebviewContent } from './webviewProvider';
 import { AnalysisData, formatAnalysisContext } from './analysisContext';
 import { streamLlmResponse, LlmConfig, ChatMessage } from './llmClient';
-import { HEAP_ANALYSIS_SYSTEM_PROMPT, buildAnalyzePrompt } from './promptTemplates';
+import { HEAP_ANALYSIS_SYSTEM_PROMPT, buildAnalyzePrompt, sanitizeChatInput } from './promptTemplates';
 import { resolveSource } from './sourceResolver';
 import type { DependencyInfo } from './dependencyResolver';
 import { allHandlers, MessageHandler, EditorState } from './messageHandlers';
@@ -329,6 +329,17 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
     public handleChatMessage(text: string, hprofPath: string, webviewPanel: vscode.WebviewPanel): void {
         const state = this.editors.get(hprofPath);
         if (!state) { return; }
+
+        // Sanitize and validate input before sending to LLM
+        const validation = sanitizeChatInput(text);
+        if (!validation.safe) {
+            webviewPanel.webview.postMessage({
+                command: 'chatError',
+                message: validation.reason
+            });
+            return;
+        }
+        text = validation.text;
 
         const config = vscode.workspace.getConfiguration('heaplens.llm');
         const llmConfig: LlmConfig = {
