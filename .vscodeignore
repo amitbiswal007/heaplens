@@ -20,6 +20,9 @@ CLAUDE.md
 *.md
 !package.json
 
+# Source SVG (PNG is used by the extension)
+icon.svg
+
 # OS / editor junk
 .DS_Store
 Thumbs.db

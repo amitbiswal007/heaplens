@@ -3,7 +3,7 @@
   "displayName": "HeapLens",
   "description": "LLM-powered Java heap dump analyzer — dominator tree, leak detection, HeapQL queries, AI chat, and interactive D3.js visualizations for .hprof files",
   "version": "0.1.0",
-  "publisher": "SachinGupta",
+  "publisher": "guptasachinn",
   "license": "Apache-2.0",
   "icon": "icon.png",
   "repository": {
