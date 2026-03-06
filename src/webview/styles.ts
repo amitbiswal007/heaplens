@@ -1115,5 +1115,29 @@ export function getStyles(): string {
             background: var(--vscode-button-hoverBackground, rgba(255,255,255,0.1));
             color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
         }
+
+        /* Android badge */
+        .android-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 600;
+            background: #3ddc84;
+            color: #1b1b1b;
+            letter-spacing: 0.3px;
+        }
+
+        /* Heap type chips (Android heap regions) */
+        .heap-type-chip {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 8px;
+            font-size: 10px;
+            font-weight: 500;
+            background: var(--vscode-badge-background, rgba(255,255,255,0.1));
+            color: var(--vscode-badge-foreground, var(--vscode-foreground));
+            margin-right: 4px;
+        }
     `;
 }

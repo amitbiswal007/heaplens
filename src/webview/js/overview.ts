@@ -6,7 +6,7 @@ export function getOverviewJs(): string {
         function renderOverview(data) {
             var s = data.summary;
             if (s) {
-                document.getElementById('stats-bar').innerHTML = [
+                var statsHtml = [
                     { label: 'Reachable Heap', value: fmt(s.reachable_heap_size || s.total_heap_size) },
                     { label: 'Total Heap', value: fmt(s.total_heap_size) },
                     { label: 'Objects', value: fmtNum(s.total_instances) },
@@ -14,6 +14,20 @@ export function getOverviewJs(): string {
                     { label: 'Arrays', value: fmtNum(s.total_arrays) },
                     { label: 'GC Roots', value: fmtNum(s.total_gc_roots) }
                 ].map(function(c) { return '<div class="stat-card"><div class="label">' + c.label + '</div><div class="value">' + c.value + '</div></div>'; }).join('');
+
+                // Platform badge
+                var isAndroid = s.hprof_version && s.hprof_version.indexOf('1.0.3') !== -1;
+                if (isAndroid) {
+                    statsHtml += '<div class="stat-card"><div class="label">Platform</div><div class="value"><span class="android-badge">Android (ART)</span></div></div>';
+                }
+
+                // Heap type chips (Android heap regions)
+                if (s.heap_types && s.heap_types.length > 0) {
+                    var chips = s.heap_types.map(function(t) { return '<span class="heap-type-chip">' + escapeHtml(t) + '</span>'; }).join(' ');
+                    statsHtml += '<div class="stat-card"><div class="label">Heap Regions</div><div class="value">' + chips + '</div></div>';
+                }
+
+                document.getElementById('stats-bar').innerHTML = statsHtml;
             }
 
             var objs = (data.topObjects || []).filter(function(o) { return o.node_type !== 'Class' && o.node_type !== 'SuperRoot' && o.retained_size > 0; }).slice(0, 10);
@@ -261,7 +275,7 @@ export function getOverviewJs(): string {
         onMessage('analysisProgress', function(msg) {
             var s = msg.summary;
             if (!s) return;
-            document.getElementById('stats-bar').innerHTML = [
+            var progressHtml = [
                 { label: 'Reachable Heap', value: fmt(s.reachable_heap_size || s.total_heap_size) },
                 { label: 'Total Heap', value: fmt(s.total_heap_size) },
                 { label: 'Objects', value: fmtNum(s.total_instances) },
@@ -269,6 +283,13 @@ export function getOverviewJs(): string {
                 { label: 'Arrays', value: fmtNum(s.total_arrays) },
                 { label: 'GC Roots', value: fmtNum(s.total_gc_roots) }
             ].map(function(c) { return '<div class="stat-card"><div class="label">' + c.label + '</div><div class="value">' + c.value + '</div></div>'; }).join('');
+
+            var isAndroidP = s.hprof_version && s.hprof_version.indexOf('1.0.3') !== -1;
+            if (isAndroidP) {
+                progressHtml += '<div class="stat-card"><div class="label">Platform</div><div class="value"><span class="android-badge">Android (ART)</span></div></div>';
+            }
+
+            document.getElementById('stats-bar').innerHTML = progressHtml;
         });
 
         onMessage('analysisComplete', function(msg) {

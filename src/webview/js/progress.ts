@@ -51,6 +51,19 @@ export function getProgressJs(): string {
             }
         }
 
+        function renderHprofVersion(summary) {
+            var el = document.getElementById('file-metadata');
+            if (!el || !summary || !summary.hprof_version) return;
+            var isAndroid = summary.hprof_version.indexOf('1.0.3') !== -1;
+            if (isAndroid) {
+                var badge = document.createElement('span');
+                badge.className = 'file-meta-item android-badge';
+                badge.textContent = 'Android';
+                el.appendChild(badge);
+                el.style.display = 'flex';
+            }
+        }
+
         function showProgressMessage(html) {
             var bar = document.getElementById('progress-bar');
             if (!bar) return;
@@ -74,6 +87,9 @@ export function getProgressJs(): string {
             }
             if (msg.fileMetadata) {
                 renderFileMetadata(msg.fileMetadata);
+            }
+            if (msg.summary) {
+                renderHprofVersion(msg.summary);
             }
         });
 
