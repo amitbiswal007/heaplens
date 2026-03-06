@@ -1051,5 +1051,23 @@ export function getStyles(): string {
             font-size: 12px;
             opacity: 0.85;
         }
+
+        .why-alive-btn {
+            display: inline-block;
+            padding: 1px 8px;
+            font-size: 11px;
+            border-radius: 10px;
+            border: 1px solid var(--vscode-button-border, var(--vscode-textLink-foreground));
+            background: transparent;
+            color: var(--vscode-textLink-foreground);
+            cursor: pointer;
+            white-space: nowrap;
+            vertical-align: middle;
+            line-height: 18px;
+        }
+        .why-alive-btn:hover {
+            background: var(--vscode-button-hoverBackground, rgba(255,255,255,0.1));
+            color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
+        }
     `;
 }

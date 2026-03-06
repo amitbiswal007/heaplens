@@ -33,7 +33,7 @@ export function getLeakSuspectsJs(): string {
                     ? ' | <a class="go-to-source-link" data-class="' + escapeHtml(s.class_name) + '">View Source</a>'
                     : '';
                 var gcPathLink = s.object_id
-                    ? ' | <a class="gc-path-link" data-object-id="' + s.object_id + '" style="cursor:pointer;color:var(--vscode-textLink-foreground);">GC Path</a>'
+                    ? ' <button class="why-alive-btn gc-path-link" data-object-id="' + s.object_id + '">Why alive?</button>'
                     : '';
                 var cachedDep = depInfoCache[s.class_name];
                 var depBadge = cachedDep ? makeBadgeHtml(cachedDep.tier, cachedDep.dependency) : '';

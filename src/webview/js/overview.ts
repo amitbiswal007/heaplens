@@ -17,12 +17,19 @@ export function getOverviewJs(): string {
             }
 
             var objs = (data.topObjects || []).filter(function(o) { return o.node_type !== 'Class' && o.node_type !== 'SuperRoot' && o.retained_size > 0; }).slice(0, 10);
-            var html = '<table><thead><tr><th>#</th><th>Class</th><th>Type</th><th class="right">Shallow</th><th class="right">Retained</th></tr></thead><tbody>';
+            var html = '<table><thead><tr><th>#</th><th>Class</th><th>Type</th><th class="right">Shallow</th><th class="right">Retained</th><th></th></tr></thead><tbody>';
             objs.forEach(function(o, i) {
-                html += '<tr><td>' + (i+1) + '</td><td>' + escapeHtml(o.class_name || o.node_type) + '</td><td>' + o.node_type + '</td><td class="right">' + fmt(o.shallow_size) + '</td><td class="right">' + fmt(o.retained_size) + '</td></tr>';
+                var whyBtn = o.object_id ? '<button class="why-alive-btn" data-object-id="' + o.object_id + '">Why alive?</button>' : '';
+                html += '<tr><td>' + (i+1) + '</td><td>' + escapeHtml(o.class_name || o.node_type) + '</td><td>' + o.node_type + '</td><td class="right">' + fmt(o.shallow_size) + '</td><td class="right">' + fmt(o.retained_size) + '</td><td>' + whyBtn + '</td></tr>';
             });
             html += '</tbody></table>';
-            document.getElementById('top-objects-table').innerHTML = html;
+            var topTable = document.getElementById('top-objects-table');
+            topTable.innerHTML = html;
+            topTable.querySelectorAll('.why-alive-btn').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    vscode.postMessage({ command: 'gcRootPath', objectId: parseInt(btn.dataset.objectId, 10) });
+                });
+            });
 
             renderTreemap(objs);
             renderBarChart(objs);

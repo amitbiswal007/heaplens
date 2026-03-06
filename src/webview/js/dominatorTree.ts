@@ -83,7 +83,7 @@ export function getDominatorTreeJs(): string {
                 '<span class="tree-size">' + fmt(obj.retained_size) + '</span>' +
                 '<span class="tree-bar-wrap"><div class="tree-bar" style="width:' + barWidth + '%"></div></span>' +
                 '<span class="tree-pct">' + pctStr + '%</span>' +
-                (showPin ? '<span class="tree-pin" title="Show GC root path">\\uD83D\\uDCCD</span>' : '') +
+                (showPin ? '<button class="why-alive-btn" title="Show GC root path">Why alive?</button>' : '') +
                 (showInspect ? '<span class="tree-inspect" title="Inspect fields">\\uD83D\\uDD0D</span>' : '') +
                 (showSource ? '<span class="tree-source" title="Go to source">\\u2197</span>' : '') +
                 depBadge;
@@ -103,7 +103,7 @@ export function getDominatorTreeJs(): string {
             }
 
             if (showPin) {
-                row.querySelector('.tree-pin').addEventListener('click', function(e) {
+                row.querySelector('.why-alive-btn').addEventListener('click', function(e) {
                     e.stopPropagation();
                     vscode.postMessage({ command: 'gcRootPath', objectId: obj.object_id });
                 });
