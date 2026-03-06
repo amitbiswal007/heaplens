@@ -1,0 +1,11 @@
+[package]
+name = "jvm-hprof"
+version = "0.1.0"
+edition = "2018"
+license-file = "LICENSE.txt"
+
+[dependencies]
+getset = "0.0.9"
+nom = "5.0.1"
+strum = "0.20.0"
+strum_macros = "0.20.1"

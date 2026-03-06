@@ -12,7 +12,7 @@ name = "hprof-server"
 path = "src/main.rs"
 
 [dependencies]
-jvm-hprof = "0.1"
+jvm-hprof = { path = "crates/jvm-hprof" }
 memmap2 = "0.9"
 anyhow = "1.0"
 thiserror = "1.0"
