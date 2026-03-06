@@ -900,6 +900,54 @@ export function getStyles(): string {
             white-space: normal;
         }
 
+        /* Histogram class links & instance panel */
+        .hist-class-link {
+            cursor: pointer;
+            color: var(--vscode-textLink-foreground, #3794ff);
+            text-decoration: none;
+        }
+        .hist-class-link:hover { text-decoration: underline; }
+        .instance-panel {
+            background: var(--vscode-editorWidget-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 6px;
+            margin: 12px 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+        }
+        .instance-panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--vscode-panel-border);
+            font-weight: 600;
+            font-size: 12px;
+        }
+        .instance-panel-close {
+            background: none;
+            border: none;
+            color: var(--vscode-foreground);
+            font-size: 18px;
+            cursor: pointer;
+            opacity: 0.6;
+            padding: 0 4px;
+        }
+        .instance-panel-close:hover { opacity: 1; }
+        .instance-panel table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        .instance-panel th {
+            text-align: left;
+            padding: 6px 10px;
+            border-bottom: 1px solid var(--vscode-panel-border);
+            font-weight: 600;
+            font-size: 11px;
+            opacity: 0.7;
+        }
+        .instance-panel td { padding: 4px 10px; border-bottom: 1px solid var(--vscode-panel-border); }
+        .instance-panel tr:hover { background: var(--vscode-list-hoverBackground); }
+        .instance-actions { display: flex; gap: 6px; align-items: center; }
+        .instance-action { cursor: pointer; opacity: 0.7; }
+        .instance-action:hover { opacity: 1; }
+
         /* Auto-Diagnosis cards */
         .diagnosis-section { margin-bottom: var(--hl-space-xl); }
         .diagnosis-card {

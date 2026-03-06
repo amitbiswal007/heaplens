@@ -8,6 +8,7 @@ export function getHistogramJs(): string {
         var _histFilter = '';
         var _histShowAll = false;
         var HISTOGRAM_PAGE_SIZE = 200;
+        var _pendingInstanceClass = null;
 
         function renderHistogram(histogram) {
             var container = document.getElementById('histogram-table');
@@ -51,7 +52,7 @@ export function getHistogramJs(): string {
 
             displayRows.forEach(function(e) {
                 var pct = ((e.retained_size / totalRetained) * 100).toFixed(1);
-                html += '<tr><td>' + escapeHtml(e.class_name) + '</td><td class="right">' + fmtNum(e.instance_count) + '</td><td class="right">' + fmt(e.shallow_size) + '</td><td class="right">' + fmt(e.retained_size) + '</td><td class="right">' + pct + '%</td></tr>';
+                html += '<tr><td><span class="hist-class-link" data-class="' + escapeHtml(e.class_name) + '">' + escapeHtml(e.class_name) + '</span></td><td class="right">' + fmtNum(e.instance_count) + '</td><td class="right">' + fmt(e.shallow_size) + '</td><td class="right">' + fmt(e.retained_size) + '</td><td class="right">' + pct + '%</td></tr>';
             });
             html += '</tbody></table>';
 
@@ -93,11 +94,105 @@ export function getHistogramJs(): string {
                     vscode.postMessage({ command: 'exportHistogramCsv', csv: csv });
                 });
             }
+
+            // Delegated click handler for class name links
+            container.querySelectorAll('.hist-class-link').forEach(function(link) {
+                link.addEventListener('click', function() {
+                    var className = link.dataset.class;
+                    if (!className) return;
+                    _pendingInstanceClass = className;
+                    var panel = document.getElementById('histogram-instances-panel');
+                    panel.innerHTML = '<div class="instance-panel"><div class="instance-panel-header"><span>Loading instances of ' + escapeHtml(className) + '...</span></div></div>';
+                    var escapedClass = className.replace(/'/g, "''");
+                    vscode.postMessage({ command: 'executeQuery', query: "SELECT * FROM instances WHERE class_name = \\'" + escapedClass + "\\' ORDER BY retained_size DESC LIMIT 200" });
+                });
+            });
         }
 
         // ---- Self-register ----
         onTabMessage('histogram', 'analysisComplete', function(msg) {
             renderHistogram(msg.classHistogram || []);
+        });
+
+        function renderInstancePanel(className, result) {
+            var panel = document.getElementById('histogram-instances-panel');
+            if (!result || !result.rows || result.rows.length === 0) {
+                panel.innerHTML = '<div class="instance-panel"><div class="instance-panel-header"><span>Instances of ' + escapeHtml(className) + ' (0)</span><button class="instance-panel-close">&times;</button></div><div style="padding:12px;opacity:0.5;font-size:12px;">No instances found</div></div>';
+                panel.querySelector('.instance-panel-close').addEventListener('click', function() { panel.innerHTML = ''; _pendingInstanceClass = null; });
+                return;
+            }
+
+            var cols = result.columns || [];
+            var rows = result.rows || [];
+            var totalRows = result.total_count || rows.length;
+            var html = '<div class="instance-panel"><div class="instance-panel-header"><span>Instances of ' + escapeHtml(className) + ' (' + totalRows + ')</span><button class="instance-panel-close">&times;</button></div>';
+            html += '<table><thead><tr>';
+            cols.forEach(function(c) { html += '<th>' + escapeHtml(c) + '</th>'; });
+            html += '<th>Actions</th></tr></thead><tbody>';
+
+            rows.forEach(function(row) {
+                html += '<tr>';
+                var objId = 0;
+                cols.forEach(function(c, ci) {
+                    var val = row[ci];
+                    if (c === 'object_id') objId = val;
+                    if (c === 'shallow_size' || c === 'retained_size') {
+                        html += '<td class="right">' + fmt(val) + '</td>';
+                    } else {
+                        html += '<td>' + escapeHtml(String(val)) + '</td>';
+                    }
+                });
+                html += '<td class="instance-actions">';
+                if (objId > 0) {
+                    html += '<span class="tree-inspect instance-action" data-id="' + objId + '" data-class="' + escapeHtml(className) + '" title="Inspect">\\uD83D\\uDD0D</span>';
+                    html += '<span class="tree-refs instance-action" data-id="' + objId + '" data-class="' + escapeHtml(className) + '" title="Show referrers">\\u2190</span>';
+                    html += '<button class="why-alive-btn instance-action" data-id="' + objId + '" title="Why alive?" style="font-size:10px;padding:1px 4px;">Why alive?</button>';
+                }
+                html += '</td></tr>';
+            });
+            html += '</tbody></table>';
+
+            if (rows.length < totalRows) {
+                html += '<div style="text-align:center;padding:8px;font-size:11px;opacity:0.6;">Showing ' + rows.length + ' of ' + totalRows + ' \\u2014 use HeapQL for full results</div>';
+            }
+
+            if (result.execution_time_ms !== undefined) {
+                html += '<div style="text-align:right;padding:4px 8px;font-size:10px;opacity:0.5;">' + rows.length + ' rows (' + result.execution_time_ms + 'ms)</div>';
+            }
+
+            html += '</div>';
+            panel.innerHTML = html;
+
+            panel.querySelector('.instance-panel-close').addEventListener('click', function() { panel.innerHTML = ''; _pendingInstanceClass = null; });
+
+            panel.querySelectorAll('.tree-inspect.instance-action').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    openInspector(parseInt(btn.dataset.id), btn.dataset.class, 0, 0);
+                });
+            });
+
+            panel.querySelectorAll('.tree-refs.instance-action').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    var objId = parseInt(btn.dataset.id);
+                    window._pendingRefsContext = { objectId: objId, className: btn.dataset.class };
+                    vscode.postMessage({ command: 'getReferrers', objectId: objId });
+                });
+            });
+
+            panel.querySelectorAll('.why-alive-btn.instance-action').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    vscode.postMessage({ command: 'gcRootPath', objectId: parseInt(btn.dataset.id) });
+                });
+            });
+        }
+
+        onMessage('queryResult', function(msg) {
+            if (_pendingInstanceClass) {
+                renderInstancePanel(_pendingInstanceClass, msg.result);
+                _pendingInstanceClass = null;
+                return true; // consumed
+            }
+            return false; // let query tab handle it
         });
 
         document.getElementById('histogram-search').addEventListener('input', function(e) {

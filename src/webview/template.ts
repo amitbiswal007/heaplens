@@ -36,6 +36,7 @@ export function getHtmlTemplate(): string {
     <div id="tab-histogram" class="tab-content" role="tabpanel" aria-labelledby="tabBtn-histogram">
         <input type="text" class="search-box" id="histogram-search" placeholder="Filter by class name...">
         <div id="histogram-table"></div>
+        <div id="histogram-instances-panel"></div>
     </div>
 
     <!-- Tab 3: Dominator Tree -->
