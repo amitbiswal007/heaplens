@@ -70,5 +70,32 @@ export function getChatJs(): string {
             _chatStreamBuffer = '';
             addChatBubble('error', msg.message || 'An error occurred');
         });
+
+        onMessage('restoreChatHistory', function(msg) {
+            var messages = msg.messages || [];
+            if (messages.length === 0) return;
+            if (_chatPlaceholder) _chatPlaceholder.style.display = 'none';
+            messages.forEach(function(m) {
+                if (m.role === 'user') {
+                    addChatBubble('user', m.content);
+                } else if (m.role === 'assistant') {
+                    var bubble = addChatBubble('assistant', '');
+                    bubble.innerHTML = renderMarkdown(m.content);
+                    bubble.classList.add('rendered');
+                }
+            });
+        });
+
+        var _chatClear = document.getElementById('chat-clear');
+        if (_chatClear) {
+            _chatClear.addEventListener('click', function() {
+                _chatMessages.innerHTML = '';
+                if (_chatPlaceholder) {
+                    _chatPlaceholder.style.display = 'block';
+                    _chatMessages.appendChild(_chatPlaceholder);
+                }
+                vscode.postMessage({ command: 'clearChatHistory' });
+            });
+        }
     `;
 }

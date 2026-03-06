@@ -353,6 +353,18 @@ export function getStyles(): string {
         }
         .chat-send:hover { background: var(--vscode-button-hoverBackground); }
         .chat-send:disabled { opacity: 0.5; cursor: not-allowed; }
+        .chat-clear {
+            padding: 8px 12px;
+            background: transparent;
+            color: var(--vscode-foreground);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            align-self: flex-end;
+            opacity: 0.6;
+        }
+        .chat-clear:hover { opacity: 1; }
         .chat-placeholder {
             text-align: center;
             opacity: 0.5;

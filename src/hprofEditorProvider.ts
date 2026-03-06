@@ -44,6 +44,20 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         this.outputChannel = outputChannel;
     }
 
+    private getChatStorageKey(hprofPath: string): string {
+        return `heaplens.chat.${hprofPath.replace(/[^a-zA-Z0-9]/g, '_')}`;
+    }
+
+    private loadChatHistory(hprofPath: string): ChatMessage[] {
+        const key = this.getChatStorageKey(hprofPath);
+        return this.context.workspaceState.get<ChatMessage[]>(key, []);
+    }
+
+    private saveChatHistory(hprofPath: string, history: ChatMessage[]): void {
+        const key = this.getChatStorageKey(hprofPath);
+        this.context.workspaceState.update(key, history);
+    }
+
     public async openCustomDocument(
         uri: vscode.Uri
     ): Promise<vscode.CustomDocument> {
@@ -63,11 +77,12 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         const hprofPath = document.uri.fsPath;
         this.activeHprofPath = hprofPath;
 
-        // Create per-editor state
+        // Create per-editor state (restore chat from workspace storage)
+        const savedChat = this.loadChatHistory(hprofPath);
         const editorState: EditorState = {
             webviewPanel,
             analysisData: null,
-            chatHistory: [],
+            chatHistory: savedChat,
             pendingWebviewMessage: null,
             webviewReady: false,
             dependencyInfoCache: new Map()
@@ -366,6 +381,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
             },
             () => {
                 state.chatHistory.push({ role: 'assistant', content: assistantResponse });
+                this.saveChatHistory(hprofPath, state.chatHistory);
                 webviewPanel.webview.postMessage({ command: 'chatDone' });
             },
             (error) => {
@@ -527,6 +543,11 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
             this.outputChannel.appendLine(`[HeapLens] Go to source error for ${className}: ${error.message}`);
             webviewPanel.webview.postMessage({ command: 'sourceNotFound', className });
         }
+    }
+
+    public clearChatHistory(hprofPath: string): void {
+        const key = this.getChatStorageKey(hprofPath);
+        this.context.workspaceState.update(key, undefined);
     }
 
     public getRustClient(): RustClient | null {

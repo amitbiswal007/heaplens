@@ -163,6 +163,7 @@ export function getHtmlTemplate(): string {
             <div class="chat-input-row">
                 <textarea class="chat-input" id="chat-input" placeholder="Ask about your heap dump..." rows="1"></textarea>
                 <button class="chat-send" id="chat-send">Send</button>
+                <button class="chat-clear" id="chat-clear" title="Clear chat history">Clear</button>
             </div>
         </div>
     </div>

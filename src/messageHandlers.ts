@@ -25,6 +25,7 @@ export interface HandlerContext {
         handleChatMessage(text: string, hprofPath: string, webviewPanel: vscode.WebviewPanel): void;
         handleGoToSource(className: string, hprofPath: string, webviewPanel: vscode.WebviewPanel): Promise<void>;
         handleCopyReport(hprofPath: string, webviewPanel: vscode.WebviewPanel): void;
+        clearChatHistory(hprofPath: string): void;
     };
 }
 
@@ -358,6 +359,23 @@ const readyHandler: MessageHandler = {
             ctx.webviewPanel.webview.postMessage(ctx.state.pendingWebviewMessage);
             ctx.state.pendingWebviewMessage = null;
         }
+        // Restore chat history if available
+        if (ctx.state.chatHistory.length > 0) {
+            ctx.webviewPanel.webview.postMessage({
+                command: 'restoreChatHistory',
+                messages: ctx.state.chatHistory
+            });
+            ctx.outputChannel.appendLine(`[HeapLens] Restored ${ctx.state.chatHistory.length} chat messages`);
+        }
+    }
+};
+
+const clearChatHistoryHandler: MessageHandler = {
+    command: 'clearChatHistory',
+    async handle(_message, ctx) {
+        ctx.state.chatHistory = [];
+        ctx.provider.clearChatHistory(ctx.hprofPath);
+        ctx.outputChannel.appendLine('[HeapLens] Chat history cleared');
     }
 };
 
@@ -428,4 +446,5 @@ export const allHandlers: MessageHandler[] = [
     cancelAnalysisHandler,
     retryAnalysisHandler,
     exportHistogramCsvHandler,
+    clearChatHistoryHandler,
 ];
