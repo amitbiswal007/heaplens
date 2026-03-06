@@ -3109,6 +3109,132 @@ impl AnalysisState {
 
         None
     }
+
+    /// Returns a subtree of the dominator tree rooted at the given object,
+    /// suitable for rendering as a flame/icicle chart.
+    pub fn get_dominator_subtree(
+        &self,
+        object_id: u64,
+        max_depth: usize,
+        max_children: usize,
+    ) -> Option<DominatorTreeNode> {
+        let node_idx = if object_id == 0 {
+            self.super_root
+        } else {
+            *self.id_to_node.get(&object_id)?
+        };
+
+        let mut total_nodes = 0;
+        let node = self.build_subtree_node(node_idx, 0, max_depth, max_children, &mut total_nodes);
+        Some(node)
+    }
+
+    fn build_subtree_node(
+        &self,
+        node_idx: NodeIndex,
+        depth: usize,
+        max_depth: usize,
+        max_children: usize,
+        total_nodes: &mut usize,
+    ) -> DominatorTreeNode {
+        let i = node_idx.index();
+        let (object_id, node_type, class_name) = if i < self.node_data_map.len() {
+            let (id, nt, ref cn) = self.node_data_map[i];
+            (id, nt.to_string(), cn.to_string())
+        } else {
+            (0, "Unknown".to_string(), String::new())
+        };
+
+        let shallow_size = self.shallow_sizes.get(i).copied().unwrap_or(0);
+        let retained_size = self.retained_sizes.get(i).copied().unwrap_or(0);
+
+        *total_nodes += 1;
+        let mut children = Vec::new();
+
+        if depth < max_depth && *total_nodes < 10000 {
+            if let Some(child_indices) = self.children_map.get(&node_idx) {
+                let mut child_data: Vec<(NodeIndex, u64, &str)> = child_indices
+                    .iter()
+                    .filter_map(|&ci| {
+                        let ci_i = ci.index();
+                        if ci_i >= self.node_data_map.len() { return None; }
+                        let (_, nt, _) = &self.node_data_map[ci_i];
+                        if *nt == "Class" { return None; }
+                        let ret = self.retained_sizes.get(ci_i).copied().unwrap_or(0);
+                        if ret == 0 { return None; }
+                        Some((ci, ret, *nt))
+                    })
+                    .collect();
+
+                child_data.sort_by(|a, b| b.1.cmp(&a.1));
+
+                let show_count = child_data.len().min(max_children);
+                for &(ci, _, _) in &child_data[..show_count] {
+                    children.push(self.build_subtree_node(ci, depth + 1, max_depth, max_children, total_nodes));
+                    if *total_nodes >= 10000 { break; }
+                }
+
+                if child_data.len() > max_children {
+                    let others = &child_data[max_children..];
+                    let agg_retained: u64 = others.iter().map(|(_, r, _)| r).sum();
+                    let agg_shallow: u64 = others.iter().map(|(ci, _, _)| {
+                        self.shallow_sizes.get(ci.index()).copied().unwrap_or(0)
+                    }).sum();
+                    children.push(DominatorTreeNode {
+                        name: format!("[{} others]", others.len()),
+                        retained_size: agg_retained,
+                        shallow_size: agg_shallow,
+                        object_id: 0,
+                        node_type: "Aggregated".to_string(),
+                        children: Vec::new(),
+                    });
+                }
+            }
+        }
+
+        DominatorTreeNode {
+            name: class_name,
+            retained_size,
+            shallow_size,
+            object_id,
+            node_type,
+            children,
+        }
+    }
+}
+
+/// A node in the dominator subtree, for flame graph / icicle chart rendering.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DominatorTreeNode {
+    pub name: String,
+    pub retained_size: u64,
+    pub shallow_size: u64,
+    pub object_id: u64,
+    pub node_type: String,
+    pub children: Vec<DominatorTreeNode>,
+}
+
+/// A snapshot summary for timeline comparison across multiple heap dumps.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TimelineSnapshot {
+    pub path: String,
+    pub summary: HeapSummary,
+    pub top_classes: Vec<ClassHistogramEntry>,
+}
+
+impl AnalysisState {
+    /// Extracts a timeline snapshot from this analysis state.
+    pub fn get_timeline_snapshot(&self, path: &str, top_n: usize) -> TimelineSnapshot {
+        let top_classes: Vec<ClassHistogramEntry> = self.class_histogram.iter()
+            .take(top_n)
+            .cloned()
+            .collect();
+        TimelineSnapshot {
+            path: path.to_string(),
+            summary: self.summary.clone(),
+            top_classes,
+        }
+    }
 }
 
 /// Calculates dominators and returns both top objects and analysis state.

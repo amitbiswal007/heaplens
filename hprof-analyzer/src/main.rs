@@ -1247,6 +1247,20 @@ async fn run_jsonrpc_server() -> Result<()> {
                     ).await {
                         eprintln!("Error handling compare_heaps request: {}", e);
                     }
+                } else if request.method == "get_dominator_subtree" {
+                    if let Err(e) = handle_get_dominator_subtree_request(
+                        request,
+                        &analysis_states,
+                    ).await {
+                        eprintln!("Error handling get_dominator_subtree request: {}", e);
+                    }
+                } else if request.method == "get_timeline_data" {
+                    if let Err(e) = handle_get_timeline_data_request(
+                        request,
+                        &analysis_states,
+                    ).await {
+                        eprintln!("Error handling get_timeline_data request: {}", e);
+                    }
                 } else {
                     // Unknown method - send error response
                     if let Some(id) = request.id {
@@ -1687,6 +1701,108 @@ async fn handle_compare_heaps_request(
         "jsonrpc": "2.0",
         "id": request_id,
         "result": result
+    });
+    send_stdout(&response)?;
+
+    Ok(())
+}
+
+/// Handles a get_timeline_data request for snapshot timeline.
+async fn handle_get_timeline_data_request(
+    request: JsonRpcRequest,
+    analysis_states: &Arc<RwLock<HashMap<PathBuf, FileAnalysisState>>>,
+) -> Result<()> {
+    let params = request.params.ok_or_else(|| anyhow::anyhow!("Missing params"))?;
+    let paths: Vec<String> = params
+        .get("paths")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'paths' parameter"))?;
+    let top_n = params
+        .get("top_n")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10) as usize;
+
+    let request_id = request.id.ok_or_else(|| anyhow::anyhow!("Request ID required"))?;
+
+    let states_guard = analysis_states.read()
+        .map_err(|e| anyhow::anyhow!("Failed to read analysis states: {}", e))?;
+
+    let mut snapshots: Vec<serde_json::Value> = Vec::new();
+
+    for path_str in &paths {
+        let path = PathBuf::from(path_str);
+        if let Some(file_state) = states_guard.get(&path) {
+            if let Ok(state_guard) = file_state.state.read() {
+                if let Some(ref analysis_state) = *state_guard {
+                    let snapshot = analysis_state.get_timeline_snapshot(path_str, top_n);
+                    // Get file mtime as timestamp
+                    let timestamp = std::fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let mut val = serde_json::to_value(&snapshot).unwrap_or_default();
+                    if let Some(obj) = val.as_object_mut() {
+                        obj.insert("timestamp".to_string(), serde_json::json!(timestamp));
+                    }
+                    snapshots.push(val);
+                }
+            }
+        }
+    }
+
+    // Sort by timestamp
+    snapshots.sort_by(|a, b| {
+        let ta = a.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
+        let tb = b.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
+        ta.cmp(&tb)
+    });
+
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": { "snapshots": snapshots }
+    });
+    send_stdout(&response)?;
+
+    Ok(())
+}
+
+/// Handles a get_dominator_subtree request for flame graph / icicle chart.
+async fn handle_get_dominator_subtree_request(
+    request: JsonRpcRequest,
+    analysis_states: &Arc<RwLock<HashMap<PathBuf, FileAnalysisState>>>,
+) -> Result<()> {
+    let params = request.params.ok_or_else(|| anyhow::anyhow!("Missing params"))?;
+    let path = params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'path' parameter"))?;
+    let object_id = params
+        .get("object_id")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let max_depth = params
+        .get("max_depth")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(6) as usize;
+    let max_children = params
+        .get("max_children")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(20) as usize;
+
+    let request_id = request.id.ok_or_else(|| anyhow::anyhow!("Request ID required"))?;
+
+    let analysis_state = get_analysis_state_for_path(analysis_states, path)
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    let subtree = analysis_state.get_dominator_subtree(object_id, max_depth, max_children);
+
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": subtree
     });
     send_stdout(&response)?;
 

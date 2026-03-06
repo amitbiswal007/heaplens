@@ -325,13 +325,14 @@ export function getQueryJs(): string {
             _acVisible = true;
             var html = '';
             items.forEach(function(item, idx) {
-                html += '<div class="query-ac-item' + (idx === 0 ? ' active' : '') + '" data-idx="' + idx + '">'
+                html += '<div class="query-ac-item' + (idx === 0 ? ' active' : '') + '" data-idx="' + idx + '" role="option"' + (idx === 0 ? ' aria-selected="true"' : ' aria-selected="false"') + '>'
                     + '<span class="query-ac-label">' + escapeHtml(item.label) + '</span>'
                     + '<span class="query-ac-kind">' + item.kind + '</span>'
                     + '</div>';
             });
             _queryAutocomplete.innerHTML = html;
             _queryAutocomplete.style.display = 'block';
+            _queryInput.setAttribute('aria-expanded', 'true');
 
             // Position below the caret
             positionAutocomplete();
@@ -363,6 +364,7 @@ export function getQueryJs(): string {
             _acIndex = -1;
             _queryAutocomplete.style.display = 'none';
             _queryAutocomplete.innerHTML = '';
+            _queryInput.setAttribute('aria-expanded', 'false');
         }
 
         function setActiveAcItem(idx) {
@@ -370,6 +372,7 @@ export function getQueryJs(): string {
             var items = _queryAutocomplete.querySelectorAll('.query-ac-item');
             items.forEach(function(el, i) {
                 el.classList.toggle('active', i === idx);
+                el.setAttribute('aria-selected', i === idx ? 'true' : 'false');
             });
             // Scroll into view
             if (items[idx]) items[idx].scrollIntoView({ block: 'nearest' });

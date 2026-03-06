@@ -14,7 +14,18 @@ import { getGcPathJs } from './webview/js/gcPath';
 import { getInspectorJs } from './webview/js/inspector';
 import { getQueryJs } from './webview/js/query';
 import { getCompareJs } from './webview/js/compare';
+import { getFlamegraphJs } from './webview/js/flamegraph';
+import { getTimelineJs } from './webview/js/timeline';
 import { getProgressJs } from './webview/js/progress';
+
+function getNonce(): string {
+    let text = '';
+    const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    for (let i = 0; i < 32; i++) {
+        text += possible.charAt(Math.floor(Math.random() * possible.length));
+    }
+    return text;
+}
 
 /**
  * Returns the HTML content for the HeapLens tabbed webview.
@@ -32,13 +43,14 @@ import { getProgressJs } from './webview/js/progress';
  */
 export function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): string {
     const d3Uri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'd3.v7.min.js'));
+    const nonce = getNonce();
 
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' ${webview.cspSource}; style-src 'unsafe-inline';">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}' ${webview.cspSource}; style-src 'unsafe-inline';">
     <title>HeapLens</title>
     <style>
 ${getStyles()}
@@ -47,8 +59,8 @@ ${getStyles()}
 <body>
 ${getHtmlTemplate()}
 
-    <script src="${d3Uri}"></script>
-    <script>
+    <script nonce="${nonce}" src="${d3Uri}"></script>
+    <script nonce="${nonce}">
     (function() {
         const vscode = acquireVsCodeApi();
 
@@ -60,6 +72,7 @@ ${getHelperJs()}
 ${getOverviewJs()}
 ${getHistogramJs()}
 ${getDominatorTreeJs()}
+${getFlamegraphJs()}
 ${getSourceJs()}
 ${getChatJs()}
 ${getWasteJs()}
@@ -68,6 +81,7 @@ ${getGcPathJs()}
 ${getInspectorJs()}
 ${getQueryJs()}
 ${getCompareJs()}
+${getTimelineJs()}
 ${getProgressJs()}
 
         // Store analysisData for tabs that re-render on filter/sort/reset

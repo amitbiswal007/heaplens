@@ -1,16 +1,33 @@
 export function getLeakSuspectsJs(): string {
     return `
         // ---- Tab 4: Leak Suspects ----
-        // Self-contained: owns explain-leak streaming buffers, rendering, pagination.
+        // Self-contained: owns explain-leak streaming buffers, rendering, pagination, threshold filtering.
 
         var _explainLeakBuffers = {};
         var _leakPage = 0;
         var LEAK_PAGE_SIZE = 10;
         var _leakSuspectsData = [];
+        var _allLeakSuspects = [];
+        var _leakThreshold = 10;
 
         function renderLeakSuspects(suspects) {
-            _leakSuspectsData = suspects || [];
+            _allLeakSuspects = suspects || [];
             _leakPage = 0;
+            applyLeakThreshold();
+        }
+
+        function applyLeakThreshold() {
+            _leakSuspectsData = _allLeakSuspects.filter(function(s) {
+                return s.retained_percentage >= _leakThreshold;
+            });
+            _leakPage = 0;
+
+            // Show/hide threshold row
+            var thresholdRow = document.getElementById('leak-threshold-row');
+            if (thresholdRow) {
+                thresholdRow.style.display = _allLeakSuspects.length > 0 ? 'flex' : 'none';
+            }
+
             renderLeakPage();
         }
 
@@ -18,8 +35,13 @@ export function getLeakSuspectsJs(): string {
             var container = document.getElementById('leak-suspects');
             var suspects = _leakSuspectsData;
 
-            if (!suspects || suspects.length === 0) {
+            if (_allLeakSuspects.length === 0) {
                 container.innerHTML = '<div class="loading">No leak suspects detected (no single object or class retains >10% of heap)</div>';
+                return;
+            }
+
+            if (suspects.length === 0) {
+                container.innerHTML = '<div class="loading">No suspects at current threshold (' + _leakThreshold + '%). Lower the minimum retained % to see more.</div>';
                 return;
             }
 
@@ -106,6 +128,17 @@ export function getLeakSuspectsJs(): string {
                         description: link.dataset.desc
                     });
                 });
+            });
+        }
+
+        // Threshold slider
+        var _leakSlider = document.getElementById('leak-threshold-slider');
+        var _leakThresholdValue = document.getElementById('leak-threshold-value');
+        if (_leakSlider) {
+            _leakSlider.addEventListener('input', function() {
+                _leakThreshold = parseInt(_leakSlider.value, 10);
+                if (_leakThresholdValue) _leakThresholdValue.textContent = _leakThreshold + '%';
+                applyLeakThreshold();
             });
         }
 

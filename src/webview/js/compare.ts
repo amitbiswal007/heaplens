@@ -7,8 +7,10 @@ export function getCompareJs(): string {
         var _compareBtn = document.getElementById('compare-btn');
         var _compareStatus = document.getElementById('compare-status');
         var _compareResults = document.getElementById('compare-results');
+        var _savedBaseline = '';
 
         _compareSelect.addEventListener('change', function() {
+            _savedBaseline = _compareSelect.value;
             _compareBtn.disabled = !_compareSelect.value;
         });
 
@@ -22,7 +24,6 @@ export function getCompareJs(): string {
         });
 
         function populateBaselineDropdown(files) {
-            var current = _compareSelect.value;
             _compareSelect.innerHTML = '<option value="">-- Select a baseline --</option>';
             files.forEach(function(f) {
                 var opt = document.createElement('option');
@@ -31,7 +32,7 @@ export function getCompareJs(): string {
                 opt.textContent = parts[parts.length - 1] + ' (' + f + ')';
                 _compareSelect.appendChild(opt);
             });
-            if (current && files.indexOf(current) !== -1) _compareSelect.value = current;
+            if (_savedBaseline && files.indexOf(_savedBaseline) !== -1) _compareSelect.value = _savedBaseline;
             _compareBtn.disabled = !_compareSelect.value;
             if (files.length === 0) {
                 _compareStatus.className = 'compare-status';
@@ -43,8 +44,9 @@ export function getCompareJs(): string {
 
         function fmtDelta(bytes) {
             if (bytes === 0) return '0 B';
+            var arrow = bytes > 0 ? '\\u2191' : '\\u2193';
             var sign = bytes > 0 ? '+' : '-';
-            return sign + fmt(Math.abs(bytes));
+            return arrow + sign + fmt(Math.abs(bytes));
         }
 
         function deltaClass(value) {
@@ -55,21 +57,21 @@ export function getCompareJs(): string {
 
         function _compareStatCard(label, value, delta, isBytes, isPct) {
             var deltaStr;
-            if (isPct) deltaStr = (delta >= 0 ? '+' : '') + delta.toFixed(1) + 'pp';
+            var arrow = delta > 0 ? '\\u2191' : (delta < 0 ? '\\u2193' : '');
+            if (isPct) deltaStr = arrow + (delta >= 0 ? '+' : '') + delta.toFixed(1) + 'pp';
             else if (isBytes) deltaStr = fmtDelta(delta);
-            else deltaStr = (delta >= 0 ? '+' : '') + fmtNum(delta);
+            else deltaStr = arrow + (delta >= 0 ? '+' : '') + fmtNum(delta);
             return '<div class="compare-stat-card">' +
                 '<div class="label">' + escapeHtml(label) + '</div>' +
                 '<div class="value">' + value + '</div>' +
                 '<div class="delta ' + deltaClass(delta) + '">' + deltaStr + '</div></div>';
         }
 
-        function _buildCompareHistTable(data, cap, filter) {
-            var filtered = data;
+        function _buildCompareHistTable(data, filter) {
+            var rows = data;
             if (filter) {
-                filtered = data.filter(function(d) { return d.class_name.toLowerCase().indexOf(filter) !== -1; });
+                rows = data.filter(function(d) { return d.class_name.toLowerCase().indexOf(filter) !== -1; });
             }
-            var rows = filtered.slice(0, cap);
             if (rows.length === 0) return '<div style="opacity:0.5; padding:12px;">No matching classes.</div>';
 
             var html = '<table><thead><tr>';
@@ -85,7 +87,8 @@ export function getCompareJs(): string {
                 html += '<tr>';
                 html += '<td>' + escapeHtml(d.class_name) + '</td>';
                 html += '<td><span class="change-badge ' + d.change_type + '">' + d.change_type + '</span></td>';
-                html += '<td class="right ' + deltaClass(d.instance_count_delta) + '">' + (d.instance_count_delta >= 0 ? '+' : '') + fmtNum(d.instance_count_delta) + '</td>';
+                var icArrow = d.instance_count_delta > 0 ? '\\u2191' : (d.instance_count_delta < 0 ? '\\u2193' : '');
+                html += '<td class="right ' + deltaClass(d.instance_count_delta) + '">' + icArrow + (d.instance_count_delta >= 0 ? '+' : '') + fmtNum(d.instance_count_delta) + '</td>';
                 html += '<td class="right ' + deltaClass(d.shallow_size_delta) + '">' + fmtDelta(d.shallow_size_delta) + '</td>';
                 html += '<td class="right ' + deltaClass(d.retained_size_delta) + '">' + fmtDelta(d.retained_size_delta) + '</td>';
                 html += '<td class="right">' + fmt(d.baseline_retained_size) + '</td>';
@@ -93,9 +96,6 @@ export function getCompareJs(): string {
                 html += '</tr>';
             });
             html += '</tbody></table>';
-            if (filtered.length > cap) {
-                html += '<div style="opacity:0.5; padding:8px; font-size:12px;">Showing ' + cap + ' of ' + filtered.length + ' classes</div>';
-            }
             return html;
         }
 
@@ -119,10 +119,9 @@ export function getCompareJs(): string {
 
             var hd = result.histogram_delta || [];
             if (hd.length > 0) {
-                var cap = Math.min(hd.length, 200);
                 html += '<div class="compare-section-title">Class Changes (' + hd.length + ' classes)</div>';
                 html += '<input type="text" class="search-box" id="compare-hist-search" placeholder="Filter by class name...">';
-                html += '<div id="compare-hist-table">' + _buildCompareHistTable(hd, cap, '') + '</div>';
+                html += '<div id="compare-hist-table">' + _buildCompareHistTable(hd, '') + '</div>';
             }
 
             var lsc = result.leak_suspect_changes || [];
@@ -167,7 +166,7 @@ export function getCompareJs(): string {
                 histSearch.addEventListener('input', function() {
                     var filter = histSearch.value.toLowerCase();
                     var table = document.getElementById('compare-hist-table');
-                    if (table) table.innerHTML = _buildCompareHistTable(hd, 200, filter);
+                    if (table) table.innerHTML = _buildCompareHistTable(hd, filter);
                 });
             }
         }

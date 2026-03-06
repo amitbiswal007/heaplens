@@ -429,6 +429,73 @@ const retryAnalysisHandler: MessageHandler = {
     }
 };
 
+const getDominatorSubtreeHandler: MessageHandler = {
+    command: 'getDominatorSubtree',
+    async handle(message, ctx) {
+        ctx.outputChannel.appendLine(`[HeapLens] getDominatorSubtree request for objectId: ${message.objectId}`);
+        try {
+            const subtree = await ctx.client.sendRequest('get_dominator_subtree', {
+                path: ctx.hprofPath,
+                object_id: message.objectId || 0,
+                max_depth: message.maxDepth || 6,
+                max_children: message.maxChildren || 20
+            });
+            ctx.webviewPanel.webview.postMessage({
+                command: 'dominatorSubtreeResponse',
+                subtree
+            });
+        } catch (error: any) {
+            ctx.outputChannel.appendLine(`[HeapLens] getDominatorSubtree error: ${error.message}`);
+            ctx.webviewPanel.webview.postMessage({
+                command: 'dominatorSubtreeResponse',
+                subtree: null
+            });
+        }
+    }
+};
+
+const getTimelineDataHandler: MessageHandler = {
+    command: 'getTimelineData',
+    async handle(message, ctx) {
+        ctx.outputChannel.appendLine(`[HeapLens] getTimelineData request for ${message.paths?.length || 0} files`);
+        try {
+            const result = await ctx.client.sendRequest('get_timeline_data', {
+                paths: message.paths || [],
+                top_n: message.topN || 10
+            });
+            ctx.webviewPanel.webview.postMessage({
+                command: 'timelineDataResponse',
+                result
+            });
+        } catch (error: any) {
+            ctx.outputChannel.appendLine(`[HeapLens] getTimelineData error: ${error.message}`);
+            ctx.webviewPanel.webview.postMessage({
+                command: 'timelineDataResponse',
+                result: null
+            });
+        }
+    }
+};
+
+const listAllAnalyzedFilesHandler: MessageHandler = {
+    command: 'listAllAnalyzedFiles',
+    async handle(_message, ctx) {
+        try {
+            const files = await ctx.client.sendRequest('list_analyzed_files', {});
+            ctx.webviewPanel.webview.postMessage({
+                command: 'allAnalyzedFiles',
+                files: Array.isArray(files) ? files : []
+            });
+        } catch (error: any) {
+            ctx.outputChannel.appendLine(`[HeapLens] listAllAnalyzedFiles error: ${error.message}`);
+            ctx.webviewPanel.webview.postMessage({
+                command: 'allAnalyzedFiles',
+                files: []
+            });
+        }
+    }
+};
+
 export const allHandlers: MessageHandler[] = [
     getChildrenHandler,
     chatMessageHandler,
@@ -447,4 +514,7 @@ export const allHandlers: MessageHandler[] = [
     retryAnalysisHandler,
     exportHistogramCsvHandler,
     clearChatHistoryHandler,
+    getDominatorSubtreeHandler,
+    getTimelineDataHandler,
+    listAllAnalyzedFilesHandler,
 ];

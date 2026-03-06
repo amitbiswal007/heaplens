@@ -22,6 +22,8 @@ export function getDominatorTreeJs(): string {
 
             var container = document.getElementById('dominator-tree');
             container.innerHTML = '';
+            container.setAttribute('role', 'tree');
+            container.setAttribute('aria-label', 'Dominator tree');
             appendCappedChildren(container, _treeData, 0);
         }
 
@@ -61,6 +63,10 @@ export function getDominatorTreeJs(): string {
             row.style.paddingLeft = (12 + depth * 20) + 'px';
             row.dataset.objectId = obj.object_id;
             row.dataset.depth = depth;
+            row.setAttribute('role', 'treeitem');
+            row.setAttribute('aria-level', String(depth + 1));
+            row.setAttribute('tabindex', '-1');
+            if (!leaf) row.setAttribute('aria-expanded', 'false');
 
             var pct = _totalRetained > 0 ? ((obj.retained_size / _totalRetained) * 100) : 0;
             var pctStr = pct.toFixed(1);
@@ -85,8 +91,8 @@ export function getDominatorTreeJs(): string {
                 '<span class="tree-pct">' + pctStr + '%</span>' +
                 '<span class="tree-actions">' +
                 '<span class="tree-action-slot tree-action-alive">' + (showPin ? '<button class="why-alive-btn" title="Show GC root path">Why alive?</button>' : '') + '</span>' +
-                '<span class="tree-action-slot tree-action-icon">' + (showInspect ? '<span class="tree-inspect" title="Inspect fields">\\uD83D\\uDD0D</span>' : '') + '</span>' +
-                '<span class="tree-action-slot tree-action-icon">' + (showSource ? '<span class="tree-source" title="Go to source">\\u2197</span>' : '') + '</span>' +
+                '<span class="tree-action-slot tree-action-icon">' + (showInspect ? '<span class="tree-inspect" role="button" aria-label="Inspect fields for ' + escapeHtml(displayName) + '" title="Inspect fields">\\uD83D\\uDD0D</span>' : '') + '</span>' +
+                '<span class="tree-action-slot tree-action-icon">' + (showSource ? '<span class="tree-source" role="button" aria-label="Go to source for ' + escapeHtml(displayName) + '" title="Go to source">\\u2197</span>' : '') + '</span>' +
                 depBadge +
                 '</span>';
 
@@ -95,8 +101,10 @@ export function getDominatorTreeJs(): string {
                     var toggle = row.querySelector('.tree-toggle');
                     var childContainer = row.nextElementSibling;
                     if (childContainer && childContainer.classList.contains('tree-children')) {
-                        childContainer.style.display = childContainer.style.display === 'none' ? 'block' : 'none';
-                        toggle.textContent = childContainer.style.display === 'none' ? '\\u25B6' : '\\u25BC';
+                        var isHidden = childContainer.style.display === 'none';
+                        childContainer.style.display = isHidden ? 'block' : 'none';
+                        toggle.textContent = isHidden ? '\\u25BC' : '\\u25B6';
+                        row.setAttribute('aria-expanded', String(isHidden));
                     } else if (toggle.textContent !== '\\u00B7') {
                         toggle.textContent = '\\u23F3';
                         vscode.postMessage({ command: 'getChildren', objectId: obj.object_id });
@@ -146,8 +154,10 @@ export function getDominatorTreeJs(): string {
                 }
 
                 toggle.textContent = '\\u25BC';
+                row.setAttribute('aria-expanded', 'true');
                 var childContainer = document.createElement('div');
                 childContainer.className = 'tree-children';
+                childContainer.setAttribute('role', 'group');
                 appendCappedChildren(childContainer, filtered, depth);
                 row.after(childContainer);
             });
@@ -177,6 +187,96 @@ export function getDominatorTreeJs(): string {
 
         document.getElementById('reset-tree-btn').addEventListener('click', function() {
             if (analysisData) renderDominatorTree(analysisData.topLayers || []);
+        });
+
+        // ---- Keyboard navigation for dominator tree ----
+        function getNextVisibleRow(row) {
+            var next = row.nextElementSibling;
+            if (next && next.classList.contains('tree-children') && next.style.display !== 'none') {
+                var firstChild = next.querySelector('.tree-row');
+                if (firstChild) return firstChild;
+                next = next.nextElementSibling;
+            }
+            if (next && next.classList.contains('tree-row')) return next;
+            if (next && next.classList.contains('tree-show-more')) return next;
+            // Walk up to find next sibling of parent container
+            var parent = row.parentElement;
+            while (parent && parent.id !== 'dominator-tree') {
+                var parentNext = parent.nextElementSibling;
+                if (parentNext && parentNext.classList.contains('tree-row')) return parentNext;
+                if (parentNext && parentNext.classList.contains('tree-show-more')) return parentNext;
+                parent = parent.parentElement;
+            }
+            return null;
+        }
+
+        function getPrevVisibleRow(row) {
+            var prev = row.previousElementSibling;
+            if (!prev) {
+                var parent = row.parentElement;
+                if (parent && parent.classList.contains('tree-children')) {
+                    var parentRow = parent.previousElementSibling;
+                    if (parentRow && parentRow.classList.contains('tree-row')) return parentRow;
+                }
+                return null;
+            }
+            if (prev.classList.contains('tree-children') && prev.style.display !== 'none') {
+                var rows = prev.querySelectorAll('.tree-row, .tree-show-more');
+                if (rows.length > 0) return rows[rows.length - 1];
+            }
+            if (prev.classList.contains('tree-children')) {
+                prev = prev.previousElementSibling;
+            }
+            if (prev && (prev.classList.contains('tree-row') || prev.classList.contains('tree-show-more'))) return prev;
+            return null;
+        }
+
+        var _domTreeContainer = document.getElementById('dominator-tree');
+        _domTreeContainer.addEventListener('keydown', function(e) {
+            var row = e.target.closest('.tree-row, .tree-show-more');
+            if (!row) return;
+            var target = null;
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                target = getNextVisibleRow(row);
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                target = getPrevVisibleRow(row);
+            } else if (e.key === 'ArrowRight' && row.classList.contains('tree-row')) {
+                e.preventDefault();
+                var expanded = row.getAttribute('aria-expanded');
+                if (expanded === 'true') {
+                    var childContainer = row.nextElementSibling;
+                    if (childContainer && childContainer.classList.contains('tree-children')) {
+                        var firstChild = childContainer.querySelector('.tree-row');
+                        if (firstChild) target = firstChild;
+                    }
+                } else if (expanded === 'false') {
+                    row.click();
+                }
+            } else if (e.key === 'ArrowLeft' && row.classList.contains('tree-row')) {
+                e.preventDefault();
+                var expanded = row.getAttribute('aria-expanded');
+                if (expanded === 'true') {
+                    row.click();
+                } else {
+                    var parent = row.parentElement;
+                    if (parent && parent.classList.contains('tree-children')) {
+                        var parentRow = parent.previousElementSibling;
+                        if (parentRow && parentRow.classList.contains('tree-row')) target = parentRow;
+                    }
+                }
+            } else if (e.key === 'Enter' || e.key === ' ') {
+                if (row.classList.contains('expandable') || row.classList.contains('tree-show-more')) {
+                    e.preventDefault();
+                    row.click();
+                }
+            }
+            if (target) {
+                row.setAttribute('tabindex', '-1');
+                target.setAttribute('tabindex', '0');
+                target.focus();
+            }
         });
     `;
 }

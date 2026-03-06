@@ -197,9 +197,9 @@ export function getOverviewJs(): string {
             var suspects = data.leakSuspects || [];
             suspects.forEach(function(s) {
                 if (s.retained_percentage > 50) {
-                    findings.push({ severity: 'critical', title: s.class_name + ' retains ' + s.retained_percentage.toFixed(1) + '% of heap', detail: getRecommendation(s.class_name, 'critical') });
+                    findings.push({ severity: 'critical', confidence: 'high', title: s.class_name + ' retains ' + s.retained_percentage.toFixed(1) + '% of heap', detail: getRecommendation(s.class_name, 'critical') });
                 } else if (s.retained_percentage > 20) {
-                    findings.push({ severity: 'warning', title: s.class_name + ' retains ' + s.retained_percentage.toFixed(1) + '% of heap', detail: getRecommendation(s.class_name, 'warning') });
+                    findings.push({ severity: 'warning', confidence: 'high', title: s.class_name + ' retains ' + s.retained_percentage.toFixed(1) + '% of heap', detail: getRecommendation(s.class_name, 'warning') });
                 }
             });
 
@@ -211,21 +211,21 @@ export function getOverviewJs(): string {
 
                 if ((cn === 'byte[]' || cn === 'char[]') && pct > 20) {
                     if (!findings.some(function(f) { return f.title.indexOf(cn) !== -1; })) {
-                        findings.push({ severity: 'warning', title: cn + ' occupies ' + pct.toFixed(1) + '% of heap', detail: getRecommendation(cn, 'warning') });
+                        findings.push({ severity: 'warning', confidence: 'medium', title: cn + ' occupies ' + pct.toFixed(1) + '% of heap', detail: getRecommendation(cn, 'warning') });
                     }
                 }
 
                 if (pct > 10) {
                     ['cache', 'pool', 'connection', 'session', 'queue', 'buffer'].forEach(function(pat) {
                         if (cnLower.indexOf(pat) !== -1 && !findings.some(function(f) { return f.title.indexOf(cn) !== -1; })) {
-                            findings.push({ severity: pct > 30 ? 'critical' : 'warning', title: cn + ' pattern detected (' + pct.toFixed(1) + '% heap)', detail: getRecommendation(cn, pct > 30 ? 'critical' : 'warning') });
+                            findings.push({ severity: pct > 30 ? 'critical' : 'warning', confidence: 'medium', title: cn + ' pattern detected (' + pct.toFixed(1) + '% heap)', detail: getRecommendation(cn, pct > 30 ? 'critical' : 'warning') });
                         }
                     });
                 }
 
                 if (entry.instance_count > 100000 && pct > 3) {
                     if (!findings.some(function(f) { return f.title.indexOf(cn) !== -1; })) {
-                        findings.push({ severity: 'info', title: fmtNum(entry.instance_count) + ' instances of ' + cn + ' (' + pct.toFixed(1) + '% heap)', detail: 'High instance count may indicate object accumulation. Check if objects are being properly released.' });
+                        findings.push({ severity: 'info', confidence: 'low', title: fmtNum(entry.instance_count) + ' instances of ' + cn + ' (' + pct.toFixed(1) + '% heap)', detail: 'High instance count may indicate object accumulation. Check if objects are being properly released.' });
                     }
                 }
             });
@@ -235,10 +235,13 @@ export function getOverviewJs(): string {
 
             if (findings.length === 0) { section.innerHTML = ''; return; }
 
-            var html = '<div class="section-title">Auto-Diagnosis</div>';
+            var severityIcons = { critical: '\\u26D4', warning: '\\u26A0', info: '\\u2139' };
+            var html = '<div class="section-title">Quick Checks</div>';
             findings.forEach(function(f) {
+                var icon = severityIcons[f.severity] || '';
                 html += '<div class="diagnosis-card ' + f.severity + '">' +
-                    '<div class="diagnosis-severity">' + f.severity.toUpperCase() + '</div>' +
+                    '<div class="diagnosis-severity">' + icon + ' ' + f.severity.toUpperCase() +
+                    ' <span class="diagnosis-confidence ' + f.confidence + '">' + f.confidence + '</span></div>' +
                     '<div class="diagnosis-title">' + escapeHtml(f.title) + '</div>' +
                     '<div class="diagnosis-detail">' + escapeHtml(f.detail) + '</div>' +
                     '</div>';

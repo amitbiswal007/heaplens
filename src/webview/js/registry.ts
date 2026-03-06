@@ -67,9 +67,15 @@ export function getRegistryJs(): string {
         // ---- Tab switching ----
         document.querySelectorAll('.tab-btn').forEach(function(btn) {
             btn.addEventListener('click', function() {
-                document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+                document.querySelectorAll('.tab-btn').forEach(function(b) {
+                    b.classList.remove('active');
+                    b.setAttribute('aria-selected', 'false');
+                    b.setAttribute('tabindex', '-1');
+                });
                 document.querySelectorAll('.tab-content').forEach(function(c) { c.classList.remove('active'); });
                 btn.classList.add('active');
+                btn.setAttribute('aria-selected', 'true');
+                btn.setAttribute('tabindex', '0');
                 document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
 
                 _activeTab = btn.dataset.tab;
@@ -89,5 +95,30 @@ export function getRegistryJs(): string {
                 }
             });
         });
+
+        // ---- Keyboard navigation for tab bar ----
+        var _tabBar = document.querySelector('.tab-bar');
+        if (_tabBar) {
+            _tabBar.addEventListener('keydown', function(e) {
+                var tabs = Array.from(document.querySelectorAll('.tab-btn'));
+                var idx = tabs.indexOf(document.activeElement);
+                if (idx === -1) return;
+                var target = null;
+                if (e.key === 'ArrowRight') {
+                    target = tabs[(idx + 1) % tabs.length];
+                } else if (e.key === 'ArrowLeft') {
+                    target = tabs[(idx - 1 + tabs.length) % tabs.length];
+                } else if (e.key === 'Home') {
+                    target = tabs[0];
+                } else if (e.key === 'End') {
+                    target = tabs[tabs.length - 1];
+                }
+                if (target) {
+                    e.preventDefault();
+                    target.focus();
+                    target.click();
+                }
+            });
+        }
     `;
 }

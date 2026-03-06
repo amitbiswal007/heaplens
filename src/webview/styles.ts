@@ -242,6 +242,21 @@ export function getStyles(): string {
             font-size: 12px;
             opacity: 0.7;
         }
+        .leak-threshold-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 16px;
+            font-size: 13px;
+        }
+        .leak-threshold-row input[type="range"] {
+            flex: 0 0 200px;
+            accent-color: var(--vscode-focusBorder);
+        }
+        .leak-threshold-row span {
+            min-width: 36px;
+            font-weight: bold;
+        }
 
         /* Charts */
         #pie-chart { width: 100%; margin: 20px auto; }
@@ -861,6 +876,20 @@ export function getStyles(): string {
         .diagnosis-card.critical .diagnosis-severity { color: var(--vscode-editorError-foreground); }
         .diagnosis-card.warning .diagnosis-severity { color: var(--vscode-editorWarning-foreground); }
         .diagnosis-card.info .diagnosis-severity { color: var(--vscode-focusBorder); }
+        .diagnosis-confidence {
+            display: inline-block;
+            font-size: 9px;
+            text-transform: uppercase;
+            padding: 1px 6px;
+            border-radius: 8px;
+            margin-left: 6px;
+            vertical-align: middle;
+            background: var(--vscode-badge-background);
+            color: var(--vscode-badge-foreground);
+        }
+        .diagnosis-confidence.high { opacity: 1; }
+        .diagnosis-confidence.medium { opacity: 0.7; }
+        .diagnosis-confidence.low { opacity: 0.5; }
         .diagnosis-title { font-weight: bold; margin-bottom: 4px; }
         .diagnosis-detail { opacity: 0.8; font-size: 12px; }
 
@@ -944,6 +973,12 @@ export function getStyles(): string {
             margin: 20px 0 10px 0;
             opacity: 0.9;
         }
+        .waste-totals-row {
+            font-weight: bold;
+            border-top: 2px solid var(--vscode-panel-border);
+            background: var(--vscode-editorWidget-background);
+        }
+        .waste-totals-row td { padding-top: 10px; }
         /* Compare tab */
         .compare-controls {
             display: flex;
@@ -1143,5 +1178,108 @@ export function getStyles(): string {
             color: var(--vscode-badge-foreground, var(--vscode-foreground));
             margin-right: 4px;
         }
+
+        /* Flame graph / icicle chart */
+        .domtree-view-toggle {
+            display: flex;
+            gap: 0;
+            margin-bottom: 12px;
+        }
+        .domtree-view-toggle .btn {
+            border-radius: 0;
+            margin-right: 0;
+            opacity: 0.6;
+            background: var(--vscode-editorWidget-background);
+            color: var(--vscode-foreground);
+            border: 1px solid var(--vscode-panel-border);
+        }
+        .domtree-view-toggle .btn:first-child { border-radius: 4px 0 0 4px; }
+        .domtree-view-toggle .btn:last-child { border-radius: 0 4px 4px 0; border-left: none; }
+        .domtree-view-toggle .btn.active {
+            opacity: 1;
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border-color: var(--vscode-button-background);
+        }
+        .flame-breadcrumb {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 8px 0;
+            font-size: 12px;
+            margin-bottom: 8px;
+            flex-wrap: wrap;
+        }
+        .flame-bc-link {
+            color: var(--vscode-textLink-foreground);
+            cursor: pointer;
+            text-decoration: none;
+        }
+        .flame-bc-link:hover { text-decoration: underline; }
+        .flame-bc-arrow { opacity: 0.4; }
+        .flame-bc-current { font-weight: bold; }
+        .flame-tooltip {
+            position: absolute;
+            padding: 6px 10px;
+            background: var(--vscode-editorWidget-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 4px;
+            font-size: 12px;
+            pointer-events: none;
+            z-index: 50;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+            max-width: 300px;
+        }
+        .flame-cell { cursor: pointer; }
+
+        /* Timeline tab */
+        .timeline-controls {
+            margin-bottom: 16px;
+        }
+        .timeline-file-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        .timeline-file-item {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 10px;
+            background: var(--vscode-editorWidget-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        .timeline-file-item:hover { background: var(--vscode-list-hoverBackground); }
+        .timeline-growth-table .anomaly {
+            background: color-mix(in srgb, var(--vscode-editorWarning-foreground) 10%, var(--vscode-editorWidget-background));
+        }
+        .timeline-growth-table .anomaly td:last-child {
+            color: var(--vscode-editorWarning-foreground);
+            font-weight: bold;
+            font-size: 11px;
+        }
+
+        /* Focus indicators */
+        *:focus-visible {
+            outline: 2px solid var(--vscode-focusBorder);
+            outline-offset: -2px;
+        }
+        .tab-btn:focus-visible { outline-offset: -4px; }
+        .tree-row:focus-visible {
+            background: var(--vscode-list-focusBackground, var(--vscode-list-hoverBackground));
+            outline-offset: -2px;
+        }
+        .search-box:focus-visible,
+        .query-input:focus-visible,
+        .chat-input:focus-visible,
+        .compare-select:focus-visible {
+            outline: 2px solid var(--vscode-focusBorder);
+            outline-offset: -1px;
+        }
+        .tree-show-more:focus-visible { outline-offset: -2px; border-radius: 3px; }
     `;
 }
