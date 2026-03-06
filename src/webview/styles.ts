@@ -682,6 +682,61 @@ export function getStyles(): string {
         }
         .tree-row:hover .tree-inspect { opacity: 0.6; }
         .tree-inspect:hover { opacity: 1 !important; }
+        .tree-refs {
+            margin-left: 6px;
+            flex-shrink: 0;
+            cursor: pointer;
+            opacity: 0;
+            font-size: 12px;
+            transition: opacity 0.15s;
+        }
+        .tree-row:hover .tree-refs { opacity: 0.6; }
+        .tree-refs:hover { opacity: 1 !important; }
+        .referrer-action { opacity: 0.7 !important; cursor: pointer; }
+        .referrer-action:hover { opacity: 1 !important; }
+        /* Referrers overlay */
+        .referrers-overlay {
+            background: var(--vscode-editorWidget-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 6px;
+            margin: 8px 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+        }
+        .referrers-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--vscode-panel-border);
+        }
+        .referrers-title { font-weight: 600; font-size: 12px; }
+        .referrers-list { max-height: 300px; overflow-y: auto; }
+        .referrer-row {
+            display: flex;
+            align-items: center;
+            padding: 5px 12px;
+            font-size: 12px;
+            gap: 8px;
+            border-bottom: 1px solid var(--vscode-panel-border);
+            cursor: default;
+        }
+        .referrer-row:last-child { border-bottom: none; }
+        .referrer-row:hover { background: var(--vscode-list-hoverBackground); }
+        .referrer-field {
+            color: var(--vscode-textLink-foreground, #3794ff);
+            font-weight: 500;
+        }
+        .referrer-class { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .referrer-type {
+            font-size: 10px;
+            padding: 1px 6px;
+            border-radius: 3px;
+            background: var(--vscode-badge-background);
+            color: var(--vscode-badge-foreground);
+            flex-shrink: 0;
+        }
+        .referrer-size { opacity: 0.7; flex-shrink: 0; min-width: 60px; text-align: right; }
+        .referrer-actions { display: flex; gap: 4px; flex-shrink: 0; }
         .gc-path-field {
             font-style: italic;
             opacity: 0.7;

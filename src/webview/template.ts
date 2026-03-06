@@ -54,7 +54,7 @@ export function getHtmlTemplate(): string {
                 <span class="tree-size" style="font-weight:bold;">Retained</span>
                 <span class="tree-bar-wrap"></span>
                 <span class="tree-pct" style="font-weight:bold;">%</span>
-                <span class="tree-actions"><span class="tree-action-alive"></span><span class="tree-action-icon"></span><span class="tree-action-icon"></span></span>
+                <span class="tree-actions"><span class="tree-action-alive"></span><span class="tree-action-icon"></span><span class="tree-action-icon"></span><span class="tree-action-icon"></span></span>
             </div>
         </div>
         <div id="dominator-tree"><div class="loading">Waiting for analysis...</div></div>

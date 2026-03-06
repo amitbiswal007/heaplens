@@ -1205,6 +1205,13 @@ async fn run_jsonrpc_server() -> Result<()> {
                     ).await {
                         eprintln!("Error handling get_children request: {}", e);
                     }
+                } else if request.method == "get_referrers" {
+                    if let Err(e) = handle_get_referrers_request(
+                        request,
+                        &analysis_states,
+                    ).await {
+                        eprintln!("Error handling get_referrers request: {}", e);
+                    }
                 } else if request.method == "export_json" {
                     if let Err(e) = handle_export_json_request(
                         request,
@@ -1451,6 +1458,46 @@ async fn handle_get_children_request(
         "jsonrpc": "2.0",
         "id": request_id,
         "result": children
+    });
+    send_stdout(&response)?;
+
+    Ok(())
+}
+
+/// Handles a get_referrers request.
+async fn handle_get_referrers_request(
+    request: JsonRpcRequest,
+    analysis_states: &Arc<RwLock<HashMap<PathBuf, FileAnalysisState>>>,
+) -> Result<()> {
+    let params = request.params.ok_or_else(|| anyhow::anyhow!("Missing params"))?;
+    let path = params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'path' parameter"))?;
+    let object_id = params
+        .get("object_id")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'object_id' parameter"))?;
+
+    let request_id = request.id.ok_or_else(|| anyhow::anyhow!("Request ID required"))?;
+
+    let analysis_states_guard = analysis_states.read()
+        .map_err(|e| anyhow::anyhow!("Failed to read analysis states: {}", e))?;
+
+    let file_state = analysis_states_guard.get(&PathBuf::from(path))
+        .ok_or_else(|| anyhow::anyhow!("No analysis found for file: {}", path))?;
+
+    let state_guard = file_state.state.read()
+        .map_err(|e| anyhow::anyhow!("Failed to read analysis state: {}", e))?;
+
+    let analysis_state = state_guard.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Analysis state not available"))?;
+
+    let referrers = analysis_state.get_referrers(object_id).unwrap_or_default();
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": referrers
     });
     send_stdout(&response)?;
 

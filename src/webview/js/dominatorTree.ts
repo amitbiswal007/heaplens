@@ -78,6 +78,7 @@ export function getDominatorTreeJs(): string {
             var depBadge = cachedDep ? makeBadgeHtml(cachedDep.tier, cachedDep.dependency) : '';
             var showPin = obj.object_id > 0;
             var showInspect = obj.node_type === 'Instance' && obj.object_id > 0;
+            var showRefs = obj.object_id > 0;
             var fieldNameHtml = obj.field_name ? '<span class="tree-field-name">' + escapeHtml(obj.field_name) + ' =</span>' : '';
 
             row.innerHTML =
@@ -93,6 +94,7 @@ export function getDominatorTreeJs(): string {
                 '<span class="tree-action-slot tree-action-alive">' + (showPin ? '<button class="why-alive-btn" title="Show GC root path">Why alive?</button>' : '') + '</span>' +
                 '<span class="tree-action-slot tree-action-icon">' + (showInspect ? '<span class="tree-inspect" role="button" aria-label="Inspect fields for ' + escapeHtml(displayName) + '" title="Inspect fields">\\uD83D\\uDD0D</span>' : '') + '</span>' +
                 '<span class="tree-action-slot tree-action-icon">' + (showSource ? '<span class="tree-source" role="button" aria-label="Go to source for ' + escapeHtml(displayName) + '" title="Go to source">\\u2197</span>' : '') + '</span>' +
+                '<span class="tree-action-slot tree-action-icon">' + (showRefs ? '<span class="tree-refs" role="button" aria-label="Show referrers for ' + escapeHtml(displayName) + '" title="Show referrers">\\u2190</span>' : '') + '</span>' +
                 depBadge +
                 '</span>';
 
@@ -130,6 +132,15 @@ export function getDominatorTreeJs(): string {
                 row.querySelector('.tree-source').addEventListener('click', function(e) {
                     e.stopPropagation();
                     vscode.postMessage({ command: 'goToSource', className: displayName });
+                });
+            }
+
+            if (showRefs) {
+                row.querySelector('.tree-refs').addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    vscode.postMessage({ command: 'getReferrers', objectId: obj.object_id });
+                    // Store context for rendering
+                    window._pendingRefsContext = { objectId: obj.object_id, className: displayName };
                 });
             }
 
@@ -187,6 +198,59 @@ export function getDominatorTreeJs(): string {
 
         document.getElementById('reset-tree-btn').addEventListener('click', function() {
             if (analysisData) renderDominatorTree(analysisData.topLayers || []);
+        });
+
+        function renderReferrersOverlay(objectId, className, referrers) {
+            var container = document.getElementById('gc-path-container');
+            if (!referrers || referrers.length === 0) {
+                container.innerHTML = '<div class="referrers-overlay"><div class="referrers-header"><span class="referrers-title">Referrers to ' + escapeHtml(className) + '</span><button class="gc-path-close">&times;</button></div><div style="padding:12px;opacity:0.5;font-size:12px;">No referrers found (this is a GC root)</div></div>';
+                container.querySelector('.gc-path-close').addEventListener('click', function() { container.innerHTML = ''; });
+                return;
+            }
+            var html = '<div class="referrers-overlay"><div class="referrers-header"><span class="referrers-title">Referrers to ' + escapeHtml(className) + ' (' + referrers.length + ')</span><button class="gc-path-close">&times;</button></div>';
+            html += '<div class="referrers-list">';
+            referrers.forEach(function(ref) {
+                var refName = ref.class_name || ref.node_type;
+                var fieldHtml = ref.field_name ? '<span class="referrer-field">' + escapeHtml(ref.field_name) + '</span> \\u2192 ' : '';
+                html += '<div class="referrer-row" data-object-id="' + ref.object_id + '" data-class="' + escapeHtml(refName) + '" data-shallow="' + ref.shallow_size + '" data-retained="' + ref.retained_size + '">' +
+                    fieldHtml +
+                    '<span class="referrer-class">' + escapeHtml(refName) + '</span>' +
+                    '<span class="referrer-type">' + ref.node_type + '</span>' +
+                    '<span class="referrer-size">' + fmt(ref.retained_size) + '</span>' +
+                    '<span class="referrer-actions">' +
+                    (ref.node_type === 'Instance' && ref.object_id > 0 ? '<span class="tree-inspect referrer-action" title="Inspect fields">\\uD83D\\uDD0D</span>' : '') +
+                    (ref.object_id > 0 ? '<span class="tree-refs referrer-action" title="Show referrers">\\u2190</span>' : '') +
+                    '</span>' +
+                    '</div>';
+            });
+            html += '</div></div>';
+            container.innerHTML = html;
+            container.querySelector('.gc-path-close').addEventListener('click', function() { container.innerHTML = ''; });
+
+            container.querySelectorAll('.referrer-row .tree-inspect').forEach(function(btn) {
+                btn.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    var row = btn.closest('.referrer-row');
+                    openInspector(parseInt(row.dataset.objectId), row.dataset.class, parseInt(row.dataset.shallow), parseInt(row.dataset.retained));
+                });
+            });
+
+            container.querySelectorAll('.referrer-row .tree-refs').forEach(function(btn) {
+                btn.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    var row = btn.closest('.referrer-row');
+                    var refId = parseInt(row.dataset.objectId);
+                    var refClass = row.dataset.class;
+                    window._pendingRefsContext = { objectId: refId, className: refClass };
+                    vscode.postMessage({ command: 'getReferrers', objectId: refId });
+                });
+            });
+        }
+
+        onMessage('referrersResponse', function(msg) {
+            var ctx = window._pendingRefsContext || {};
+            renderReferrersOverlay(msg.objectId, ctx.className || ('Object #' + msg.objectId), msg.referrers);
+            window._pendingRefsContext = null;
         });
 
         // ---- Keyboard navigation for dominator tree ----

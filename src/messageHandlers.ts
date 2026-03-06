@@ -103,6 +103,31 @@ const queryDependencyInfoHandler: MessageHandler = {
     }
 };
 
+const getReferrersHandler: MessageHandler = {
+    command: 'getReferrers',
+    async handle(message, ctx) {
+        ctx.outputChannel.appendLine(`[HeapLens] getReferrers request for objectId: ${message.objectId}`);
+        try {
+            const referrers = await ctx.client.sendRequest('get_referrers', {
+                path: ctx.hprofPath,
+                object_id: message.objectId
+            });
+            ctx.webviewPanel.webview.postMessage({
+                command: 'referrersResponse',
+                objectId: message.objectId,
+                referrers: Array.isArray(referrers) ? referrers : []
+            });
+        } catch (error: any) {
+            ctx.outputChannel.appendLine(`[HeapLens] getReferrers error: ${error.message}`);
+            ctx.webviewPanel.webview.postMessage({
+                command: 'referrersResponse',
+                objectId: message.objectId,
+                referrers: []
+            });
+        }
+    }
+};
+
 const gcRootPathHandler: MessageHandler = {
     command: 'gcRootPath',
     async handle(message, ctx) {
@@ -498,6 +523,7 @@ const listAllAnalyzedFilesHandler: MessageHandler = {
 
 export const allHandlers: MessageHandler[] = [
     getChildrenHandler,
+    getReferrersHandler,
     chatMessageHandler,
     goToSourceHandler,
     queryDependencyInfoHandler,

@@ -2764,6 +2764,56 @@ impl AnalysisState {
         Some(children_reports)
     }
 
+    /// Returns the objects that directly reference the given object.
+    ///
+    /// Uses the `reverse_refs` adjacency list (original heap graph edges, not
+    /// dominator tree edges) to find all objects that hold a reference to the
+    /// target. Filters out SuperRoot, Root, and Class nodes. Results are sorted
+    /// by retained size descending.
+    pub fn get_referrers(&self, object_id: u64) -> Option<Vec<ObjectReport>> {
+        let target_idx = *self.id_to_node.get(&object_id)?;
+        let refs = self.reverse_refs.get(&target_idx)?;
+
+        let mut reports = Vec::new();
+        for &(referrer_idx, edge_label) in refs {
+            let i = referrer_idx.index();
+            let (ref_object_id, node_type, class_name) = if i < self.node_data_map.len() {
+                let (id, nt, ref cn) = self.node_data_map[i];
+                (id, nt, cn.clone())
+            } else {
+                continue;
+            };
+
+            // Filter out synthetic nodes
+            if node_type == "SuperRoot" || node_type == "Root" || node_type == "Class" {
+                continue;
+            }
+
+            let shallow = self.shallow_sizes.get(i).copied().unwrap_or(0);
+            let retained = self.retained_sizes.get(i).copied().unwrap_or(0);
+
+            let field_name = self.resolve_edge_label(&edge_label);
+
+            let mut report = ObjectReport::new(
+                ref_object_id,
+                node_type.to_string(),
+                class_name.to_string(),
+                shallow,
+                retained,
+                referrer_idx,
+            );
+            report.field_name = field_name;
+            reports.push(report);
+        }
+
+        if reports.is_empty() {
+            return None;
+        }
+
+        reports.sort();
+        Some(reports)
+    }
+
     /// Finds the shortest reference chain from a GC root to the given object.
     ///
     /// BFS backward from the target through `reverse_refs` (original heap graph edges),
