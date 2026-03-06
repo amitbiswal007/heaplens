@@ -142,11 +142,15 @@ export function getStyles(): string {
         }
         .tree-type.array { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
         .tree-type.instance { background: var(--vscode-editorWidget-background); border: 1px solid var(--vscode-panel-border); }
-        .tree-shallow { min-width: 80px; text-align: right; opacity: 0.5; font-size: 12px; }
-        .tree-size { min-width: 90px; text-align: right; opacity: 0.8; }
+        .tree-shallow { min-width: 80px; text-align: right; opacity: 0.5; font-size: 12px; flex-shrink: 0; }
+        .tree-size { min-width: 90px; text-align: right; opacity: 0.8; flex-shrink: 0; }
         .tree-bar-wrap { width: 60px; flex-shrink: 0; margin: 0 8px; }
         .tree-bar { height: 4px; border-radius: 2px; background: var(--vscode-progressBar-background); min-width: 1px; }
-        .tree-pct { min-width: 50px; text-align: right; opacity: 0.6; font-size: 12px; }
+        .tree-pct { min-width: 50px; text-align: right; opacity: 0.6; font-size: 12px; flex-shrink: 0; }
+        .tree-actions { display: flex; align-items: center; flex-shrink: 0; margin-left: 4px; }
+        .tree-action-slot { display: inline-flex; align-items: center; justify-content: center; }
+        .tree-action-alive { width: 76px; }
+        .tree-action-icon { width: 24px; }
         .tree-children { padding-left: 20px; }
         .tree-row.leaf { opacity: 0.8; }
         .tree-row.leaf .tree-toggle { opacity: 0.3; }

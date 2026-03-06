@@ -83,10 +83,12 @@ export function getDominatorTreeJs(): string {
                 '<span class="tree-size">' + fmt(obj.retained_size) + '</span>' +
                 '<span class="tree-bar-wrap"><div class="tree-bar" style="width:' + barWidth + '%"></div></span>' +
                 '<span class="tree-pct">' + pctStr + '%</span>' +
-                (showPin ? '<button class="why-alive-btn" title="Show GC root path">Why alive?</button>' : '') +
-                (showInspect ? '<span class="tree-inspect" title="Inspect fields">\\uD83D\\uDD0D</span>' : '') +
-                (showSource ? '<span class="tree-source" title="Go to source">\\u2197</span>' : '') +
-                depBadge;
+                '<span class="tree-actions">' +
+                '<span class="tree-action-slot tree-action-alive">' + (showPin ? '<button class="why-alive-btn" title="Show GC root path">Why alive?</button>' : '') + '</span>' +
+                '<span class="tree-action-slot tree-action-icon">' + (showInspect ? '<span class="tree-inspect" title="Inspect fields">\\uD83D\\uDD0D</span>' : '') + '</span>' +
+                '<span class="tree-action-slot tree-action-icon">' + (showSource ? '<span class="tree-source" title="Go to source">\\u2197</span>' : '') + '</span>' +
+                depBadge +
+                '</span>';
 
             if (!leaf) {
                 row.addEventListener('click', function() {
