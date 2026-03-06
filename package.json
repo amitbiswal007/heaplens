@@ -4,7 +4,7 @@
   "description": "LLM-powered Java heap dump analyzer with interactive visualizations",
   "version": "0.1.0",
   "engines": {
-    "vscode": "^1.93.0"
+    "vscode": "^1.109.0"
   },
   "categories": [
     "Debuggers",

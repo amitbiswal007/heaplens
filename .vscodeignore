@@ -1,0 +1,39 @@
+# Rust source and build artifacts (binary is in bin/)
+hprof-analyzer/
+Cargo.lock
+
+# TypeScript source (compiled JS is in out/)
+src/
+tsconfig.json
+.eslintrc.json
+
+# Docusaurus site
+docs-site/
+
+# Dev tooling
+.vscode/
+.claude/
+scripts/
+
+# Project docs (not needed in extension)
+CLAUDE.md
+*.md
+!package.json
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Test and sample files
+*.hprof
+**/*.hprof
+
+# Git
+.git/
+.gitignore
+
+# Node dev dependencies are excluded by vsce automatically
+# but be explicit about node_modules just in case
+node_modules/
