@@ -724,6 +724,9 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
         .map_err(|e| anyhow::anyhow!("Failed to parse HPROF file: {:?}", e))?;
 
     let id_size = hprof.header().id_size();
+    let hprof_version = hprof.header().label()
+        .unwrap_or("unknown")
+        .to_string();
     // Estimate node count from file size: ~100 bytes per object on average
     let estimated_nodes = (data.len() / 100).max(1024);
     let mut graph = Graph::<NodeData, EdgeLabel, Directed>::with_capacity(estimated_nodes, estimated_nodes * 2);
@@ -810,6 +813,7 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
     let mut gc_root_count = 0u64;
     let mut gc_root_ids = Vec::new();
     let mut total_shallow_size = 0u64;
+    let mut heap_types: Vec<String> = Vec::new();
 
     // Also build a map of class_obj_id -> instance_size from Class sub-records
     let mut class_instance_sizes: HashMap<u64, u32> = HashMap::with_capacity(num_classes);
@@ -1018,6 +1022,96 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
                                 id_to_node.insert(obj_id, node_idx);
                             }
                         }
+                        // Android-specific GC roots (HPROF 1.0.3)
+                        jvm_hprof::heap_dump::SubRecord::GcRootInternedString(gc_root) => {
+                            let obj_id = gc_root.obj_id().id();
+                            gc_root_ids.push(obj_id);
+                            gc_root_count += 1;
+                            if !id_to_node.contains_key(&obj_id) {
+                                let node_idx = graph.add_node(NodeData::Root);
+                                id_to_node.insert(obj_id, node_idx);
+                            }
+                        }
+                        jvm_hprof::heap_dump::SubRecord::GcRootFinalizing(gc_root) => {
+                            let obj_id = gc_root.obj_id().id();
+                            gc_root_ids.push(obj_id);
+                            gc_root_count += 1;
+                            if !id_to_node.contains_key(&obj_id) {
+                                let node_idx = graph.add_node(NodeData::Root);
+                                id_to_node.insert(obj_id, node_idx);
+                            }
+                        }
+                        jvm_hprof::heap_dump::SubRecord::GcRootDebugger(gc_root) => {
+                            let obj_id = gc_root.obj_id().id();
+                            gc_root_ids.push(obj_id);
+                            gc_root_count += 1;
+                            if !id_to_node.contains_key(&obj_id) {
+                                let node_idx = graph.add_node(NodeData::Root);
+                                id_to_node.insert(obj_id, node_idx);
+                            }
+                        }
+                        jvm_hprof::heap_dump::SubRecord::GcRootReferenceCleanup(gc_root) => {
+                            let obj_id = gc_root.obj_id().id();
+                            gc_root_ids.push(obj_id);
+                            gc_root_count += 1;
+                            if !id_to_node.contains_key(&obj_id) {
+                                let node_idx = graph.add_node(NodeData::Root);
+                                id_to_node.insert(obj_id, node_idx);
+                            }
+                        }
+                        jvm_hprof::heap_dump::SubRecord::GcRootVmInternal(gc_root) => {
+                            let obj_id = gc_root.obj_id().id();
+                            gc_root_ids.push(obj_id);
+                            gc_root_count += 1;
+                            if !id_to_node.contains_key(&obj_id) {
+                                let node_idx = graph.add_node(NodeData::Root);
+                                id_to_node.insert(obj_id, node_idx);
+                            }
+                        }
+                        jvm_hprof::heap_dump::SubRecord::GcRootJniMonitor(gc_root) => {
+                            let obj_id = gc_root.obj_id().id();
+                            gc_root_ids.push(obj_id);
+                            gc_root_count += 1;
+                            if !id_to_node.contains_key(&obj_id) {
+                                let node_idx = graph.add_node(NodeData::Root);
+                                id_to_node.insert(obj_id, node_idx);
+                            }
+                        }
+                        jvm_hprof::heap_dump::SubRecord::GcRootUnreachable(gc_root) => {
+                            let obj_id = gc_root.obj_id().id();
+                            gc_root_ids.push(obj_id);
+                            gc_root_count += 1;
+                            if !id_to_node.contains_key(&obj_id) {
+                                let node_idx = graph.add_node(NodeData::Root);
+                                id_to_node.insert(obj_id, node_idx);
+                            }
+                        }
+                        // Android heap region metadata
+                        jvm_hprof::heap_dump::SubRecord::HeapDumpInfo(info) => {
+                            let heap_name_id = info.heap_name_id().id();
+                            if let Some(name) = string_table.get(&heap_name_id) {
+                                if !heap_types.contains(name) {
+                                    heap_types.push(name.clone());
+                                }
+                            }
+                        }
+                        // Android primitive array with no data
+                        jvm_hprof::heap_dump::SubRecord::PrimitiveArrayNoData(array) => {
+                            let obj_id = array.obj_id().id();
+                            let prim_type = array.primitive_type();
+                            let class_name = format!("{}[]", prim_type.java_type_name());
+
+                            if let Some(&existing_idx) = id_to_node.get(&obj_id) {
+                                if matches!(graph[existing_idx], NodeData::Root) {
+                                    graph[existing_idx] = NodeData::Array { id: obj_id, size: 0, class_name };
+                                    array_count += 1;
+                                }
+                            } else {
+                                let node_idx = graph.add_node(NodeData::Array { id: obj_id, size: 0, class_name });
+                                id_to_node.insert(obj_id, node_idx);
+                                array_count += 1;
+                            }
+                        }
                         // Instances — use class_obj_id to look up class name
                         jvm_hprof::heap_dump::SubRecord::Instance(instance) => {
                             let obj_id = instance.obj_id().id();
@@ -1156,6 +1250,8 @@ pub fn build_graph(data: &[u8]) -> Result<(HeapGraph, WasteRawData)> {
         total_classes: class_count,
         total_arrays: array_count,
         total_gc_roots: gc_root_count,
+        hprof_version,
+        heap_types,
     };
 
     log::info!(
@@ -2527,6 +2623,10 @@ pub struct HeapSummary {
     pub total_arrays: u64,
     /// Total number of GC roots.
     pub total_gc_roots: u64,
+    /// HPROF version string (e.g. "JAVA PROFILE 1.0.2" or "JAVA PROFILE 1.0.3")
+    pub hprof_version: String,
+    /// Distinct heap type names from Android HeapDumpInfo records (e.g. "app", "zygote", "image")
+    pub heap_types: Vec<String>,
 }
 
 /// Analysis state containing the dominator tree information.
@@ -3624,6 +3724,8 @@ mod tests {
                 total_classes: 1,
                 total_arrays: 0,
                 total_gc_roots: 1,
+                hprof_version: String::new(),
+                heap_types: Vec::new(),
             },
             reverse_refs,
             field_name_table: vec![],
@@ -3750,6 +3852,8 @@ mod tests {
             total_classes: 5,
             total_arrays: 10,
             total_gc_roots: 2,
+            hprof_version: String::new(),
+            heap_types: Vec::new(),
         };
         baseline.class_histogram = vec![
             ClassHistogramEntry {
@@ -3801,6 +3905,8 @@ mod tests {
             total_classes: 6,
             total_arrays: 15,
             total_gc_roots: 3,
+            hprof_version: String::new(),
+            heap_types: Vec::new(),
         };
         current.class_histogram = vec![
             ClassHistogramEntry {

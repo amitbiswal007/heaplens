@@ -1421,6 +1421,8 @@ mod tests {
             total_classes: 3,
             total_arrays: 1,
             total_gc_roots: 1,
+            hprof_version: String::new(),
+            heap_types: Vec::new(),
         };
 
         AnalysisState {
