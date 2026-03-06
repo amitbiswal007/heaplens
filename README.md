@@ -63,7 +63,7 @@ ORDER BY SUM(retained_size) DESC LIMIT 10
 
 ### AI-Powered Analysis
 
-Configure your Anthropic or OpenAI API key and ask questions in the **AI Chat** tab:
+Configure any of the 10 supported LLM providers and ask questions in the **AI Chat** tab. Supports **Anthropic**, **OpenAI**, **Google Gemini**, **DeepSeek**, **Mistral**, **Groq**, **xAI (Grok)**, **Together AI**, **OpenRouter**, and **Ollama** (local):
 
 > *"What's causing the high memory usage?"*
 > *"Show me the top 10 classes by retained size"*
@@ -122,8 +122,8 @@ adb pull /data/local/tmp/heap.hprof
 ### AI Chat Setup (Optional)
 
 1. Go to **Settings** > search `heaplens.llm`
-2. Set `heaplens.llm.provider` to `anthropic` or `openai`
-3. Set `heaplens.llm.apiKey` to your API key
+2. Set `heaplens.llm.provider` to your preferred provider (Anthropic, OpenAI, Gemini, DeepSeek, Mistral, Groq, xAI, Together AI, OpenRouter, or Ollama)
+3. Set `heaplens.llm.apiKey` to your API key (not needed for Ollama)
 4. Open the **AI Chat** tab and start asking questions
 
 ---
@@ -132,7 +132,7 @@ adb pull /data/local/tmp/heap.hprof
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `heaplens.llm.provider` | `anthropic` | LLM provider (`anthropic` or `openai`) |
+| `heaplens.llm.provider` | `anthropic` | LLM provider (anthropic, openai, gemini, deepseek, mistral, groq, xai, together, openrouter, ollama) |
 | `heaplens.llm.apiKey` | — | API key for the LLM provider |
 | `heaplens.llm.baseUrl` | — | Custom API base URL (for proxies or self-hosted) |
 | `heaplens.llm.model` | — | Model name override |

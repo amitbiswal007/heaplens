@@ -181,7 +181,7 @@ const explainObjectHandler: MessageHandler = {
     async handle(message, ctx) {
         const config = vscode.workspace.getConfiguration('heaplens.llm');
         const llmConfig: LlmConfig = {
-            provider: config.get<'anthropic' | 'openai'>('provider', 'anthropic'),
+            provider: config.get<string>('provider', 'anthropic'),
             apiKey: config.get<string>('apiKey', ''),
             baseUrl: config.get<string>('baseUrl', '') || undefined,
             model: config.get<string>('model', '') || undefined,
@@ -252,7 +252,7 @@ const explainLeakSuspectHandler: MessageHandler = {
     async handle(message, ctx) {
         const config = vscode.workspace.getConfiguration('heaplens.llm');
         const llmConfig: LlmConfig = {
-            provider: config.get<'anthropic' | 'openai'>('provider', 'anthropic'),
+            provider: config.get<string>('provider', 'anthropic'),
             apiKey: config.get<string>('apiKey', ''),
             baseUrl: config.get<string>('baseUrl', '') || undefined,
             model: config.get<string>('model', '') || undefined,

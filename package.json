@@ -95,7 +95,8 @@
       "properties": {
         "heaplens.llm.provider": {
           "type": "string",
-          "enum": ["anthropic", "openai"],
+          "enum": ["anthropic", "openai", "gemini", "deepseek", "mistral", "groq", "xai", "together", "openrouter", "ollama"],
+          "enumItemLabels": ["Anthropic (Claude)", "OpenAI (GPT)", "Google Gemini", "DeepSeek", "Mistral", "Groq", "xAI (Grok)", "Together AI", "OpenRouter", "Ollama (Local)"],
           "default": "anthropic",
           "description": "LLM provider for the AI Chat tab"
         },

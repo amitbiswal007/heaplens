@@ -1,16 +1,23 @@
 /**
- * HTTP streaming client for Anthropic and OpenAI APIs.
+ * Multi-provider LLM streaming client.
  *
  * Uses Node.js built-in https/http modules — no npm dependencies.
  * API key stays in the extension process (never exposed to the webview).
+ *
+ * To add a new provider, add an entry to PROVIDER_REGISTRY below.
+ * No other code changes are needed (Open/Closed Principle).
  */
 
 import * as https from 'https';
 import * as http from 'http';
 import { URL } from 'url';
 
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
 export interface LlmConfig {
-    provider: 'anthropic' | 'openai';
+    provider: string;
     apiKey: string;
     baseUrl?: string;
     model?: string;
@@ -20,6 +27,105 @@ export interface ChatMessage {
     role: 'user' | 'assistant' | 'system';
     content: string;
 }
+
+// ---------------------------------------------------------------------------
+// Provider registry (add new providers here)
+// ---------------------------------------------------------------------------
+
+/** How to build the HTTP request and parse the SSE stream. */
+type ApiFormat = 'anthropic' | 'openai-compatible';
+
+export interface ProviderDefinition {
+    /** Human-readable label shown in VS Code settings. */
+    label: string;
+    /** Default API base URL (user can override via heaplens.llm.baseUrl). */
+    defaultBaseUrl: string;
+    /** Default model name (user can override via heaplens.llm.model). */
+    defaultModel: string;
+    /** Which streaming format to use. */
+    apiFormat: ApiFormat;
+    /** Extra headers merged into every request (e.g. API-version headers). */
+    extraHeaders?: Record<string, string>;
+    /** Path appended to the base URL. Defaults to /v1/chat/completions (openai-compatible) or /v1/messages (anthropic). */
+    chatPath?: string;
+    /**
+     * How to set the auth header.
+     * - 'bearer'  → Authorization: Bearer <apiKey>  (default for openai-compatible)
+     * - 'x-api-key' → x-api-key: <apiKey>            (default for anthropic)
+     */
+    authStyle?: 'bearer' | 'x-api-key';
+}
+
+export const PROVIDER_REGISTRY: Record<string, ProviderDefinition> = {
+    anthropic: {
+        label: 'Anthropic (Claude)',
+        defaultBaseUrl: 'https://api.anthropic.com',
+        defaultModel: 'claude-sonnet-4-20250514',
+        apiFormat: 'anthropic',
+        extraHeaders: { 'anthropic-version': '2023-06-01' },
+    },
+    openai: {
+        label: 'OpenAI (GPT)',
+        defaultBaseUrl: 'https://api.openai.com',
+        defaultModel: 'gpt-4o',
+        apiFormat: 'openai-compatible',
+    },
+    gemini: {
+        label: 'Google Gemini',
+        defaultBaseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+        defaultModel: 'gemini-2.0-flash',
+        apiFormat: 'openai-compatible',
+    },
+    deepseek: {
+        label: 'DeepSeek',
+        defaultBaseUrl: 'https://api.deepseek.com',
+        defaultModel: 'deepseek-chat',
+        apiFormat: 'openai-compatible',
+    },
+    mistral: {
+        label: 'Mistral',
+        defaultBaseUrl: 'https://api.mistral.ai',
+        defaultModel: 'mistral-large-latest',
+        apiFormat: 'openai-compatible',
+    },
+    groq: {
+        label: 'Groq',
+        defaultBaseUrl: 'https://api.groq.com/openai',
+        defaultModel: 'llama-3.3-70b-versatile',
+        apiFormat: 'openai-compatible',
+    },
+    xai: {
+        label: 'xAI (Grok)',
+        defaultBaseUrl: 'https://api.x.ai',
+        defaultModel: 'grok-3-mini',
+        apiFormat: 'openai-compatible',
+    },
+    together: {
+        label: 'Together AI',
+        defaultBaseUrl: 'https://api.together.xyz',
+        defaultModel: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+        apiFormat: 'openai-compatible',
+    },
+    openrouter: {
+        label: 'OpenRouter',
+        defaultBaseUrl: 'https://openrouter.ai/api',
+        defaultModel: 'auto',
+        apiFormat: 'openai-compatible',
+    },
+    ollama: {
+        label: 'Ollama (Local)',
+        defaultBaseUrl: 'http://localhost:11434',
+        defaultModel: 'llama3',
+        apiFormat: 'openai-compatible',
+    },
+};
+
+/** All valid provider keys, for use in package.json enum and type guards. */
+export const PROVIDER_IDS = Object.keys(PROVIDER_REGISTRY);
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
 /**
  * Streams an LLM response, calling callbacks for each chunk.
@@ -31,29 +137,45 @@ export function streamLlmResponse(
     onDone: () => void,
     onError: (error: string) => void
 ): void {
-    if (!config.apiKey) {
+    const providerKey = config.provider || 'anthropic';
+    const provider = PROVIDER_REGISTRY[providerKey];
+
+    if (!provider) {
+        onError(`Unknown LLM provider "${providerKey}". Supported: ${PROVIDER_IDS.join(', ')}`);
+        return;
+    }
+
+    if (!config.apiKey && providerKey !== 'ollama') {
         onError('No API key configured. Set heaplens.llm.apiKey in VS Code settings.');
         return;
     }
 
-    if (config.provider === 'anthropic') {
-        streamAnthropic(config, messages, onChunk, onDone, onError);
+    const baseUrl = config.baseUrl || provider.defaultBaseUrl;
+    const model = config.model || provider.defaultModel;
+    const authStyle = provider.authStyle ?? (provider.apiFormat === 'anthropic' ? 'x-api-key' : 'bearer');
+
+    if (provider.apiFormat === 'anthropic') {
+        streamAnthropic(baseUrl, model, config.apiKey, provider, authStyle, messages, onChunk, onDone, onError);
     } else {
-        streamOpenAI(config, messages, onChunk, onDone, onError);
+        streamOpenAICompatible(baseUrl, model, config.apiKey, provider, authStyle, messages, onChunk, onDone, onError);
     }
 }
 
+// ---------------------------------------------------------------------------
+// Streaming implementations
+// ---------------------------------------------------------------------------
+
 function streamAnthropic(
-    config: LlmConfig,
+    baseUrl: string,
+    model: string,
+    apiKey: string,
+    provider: ProviderDefinition,
+    authStyle: 'bearer' | 'x-api-key',
     messages: ChatMessage[],
     onChunk: (text: string) => void,
     onDone: () => void,
     onError: (error: string) => void
 ): void {
-    const baseUrl = config.baseUrl || 'https://api.anthropic.com';
-    const model = config.model || 'claude-sonnet-4-20250514';
-
-    // Separate system message from conversation messages
     const systemMessages = messages.filter(m => m.role === 'system');
     const conversationMessages = messages.filter(m => m.role !== 'system');
 
@@ -68,76 +190,34 @@ function streamAnthropic(
         }))
     });
 
-    const url = new URL(`${baseUrl}/v1/messages`);
-    const options: https.RequestOptions = {
-        hostname: url.hostname,
-        port: url.port || (url.protocol === 'https:' ? 443 : 80),
-        path: url.pathname,
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': config.apiKey,
-            'anthropic-version': '2023-06-01',
-            'Content-Length': Buffer.byteLength(body)
-        }
+    const chatPath = provider.chatPath || '/v1/messages';
+    const url = new URL(`${baseUrl}${chatPath}`);
+    const headers: Record<string, string | number> = {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+        ...buildAuthHeader(authStyle, apiKey),
+        ...(provider.extraHeaders || {}),
     };
 
-    const transport = url.protocol === 'https:' ? https : http;
-    const req = transport.request(options, (res) => {
-        if (res.statusCode && res.statusCode >= 400) {
-            let errorBody = '';
-            res.on('data', (chunk) => { errorBody += chunk.toString(); });
-            res.on('end', () => {
-                onError(`Anthropic API error (${res.statusCode}): ${errorBody}`);
-            });
-            return;
+    makeStreamingRequest(url, headers, body, 'Anthropic', (data) => {
+        const event = JSON.parse(data);
+        if (event.type === 'content_block_delta' && event.delta?.text) {
+            onChunk(event.delta.text);
         }
-
-        let buffer = '';
-        res.on('data', (chunk) => {
-            buffer += chunk.toString();
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || '';
-
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    const data = line.slice(6).trim();
-                    if (data === '[DONE]') { continue; }
-                    try {
-                        const event = JSON.parse(data);
-                        if (event.type === 'content_block_delta' && event.delta?.text) {
-                            onChunk(event.delta.text);
-                        } else if (event.type === 'message_stop') {
-                            // Stream complete
-                        }
-                    } catch {
-                        // Skip malformed SSE lines
-                    }
-                }
-            }
-        });
-
-        res.on('end', () => { onDone(); });
-    });
-
-    req.on('error', (err) => {
-        onError(`Request failed: ${err.message}`);
-    });
-
-    req.write(body);
-    req.end();
+    }, onDone, onError);
 }
 
-function streamOpenAI(
-    config: LlmConfig,
+function streamOpenAICompatible(
+    baseUrl: string,
+    model: string,
+    apiKey: string,
+    provider: ProviderDefinition,
+    authStyle: 'bearer' | 'x-api-key',
     messages: ChatMessage[],
     onChunk: (text: string) => void,
     onDone: () => void,
     onError: (error: string) => void
 ): void {
-    const baseUrl = config.baseUrl || 'https://api.openai.com';
-    const model = config.model || 'gpt-4o';
-
     const body = JSON.stringify({
         model,
         stream: true,
@@ -147,17 +227,54 @@ function streamOpenAI(
         }))
     });
 
-    const url = new URL(`${baseUrl}/v1/chat/completions`);
+    const chatPath = provider.chatPath || '/v1/chat/completions';
+    const url = new URL(`${baseUrl}${chatPath}`);
+    const headers: Record<string, string | number> = {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+        ...(apiKey ? buildAuthHeader(authStyle, apiKey) : {}),
+        ...(provider.extraHeaders || {}),
+    };
+
+    makeStreamingRequest(url, headers, body, provider.label, (data) => {
+        const event = JSON.parse(data);
+        const content = event.choices?.[0]?.delta?.content;
+        if (content) {
+            onChunk(content);
+        }
+    }, onDone, onError);
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+function buildAuthHeader(style: 'bearer' | 'x-api-key', apiKey: string): Record<string, string> {
+    if (style === 'x-api-key') {
+        return { 'x-api-key': apiKey };
+    }
+    return { 'Authorization': `Bearer ${apiKey}` };
+}
+
+/**
+ * Shared SSE streaming over HTTP(S). Both API formats use the same
+ * transport — only the JSON parsing callback differs.
+ */
+function makeStreamingRequest(
+    url: URL,
+    headers: Record<string, string | number>,
+    body: string,
+    providerLabel: string,
+    onSseData: (data: string) => void,
+    onDone: () => void,
+    onError: (error: string) => void
+): void {
     const options: https.RequestOptions = {
         hostname: url.hostname,
         port: url.port || (url.protocol === 'https:' ? 443 : 80),
-        path: url.pathname,
+        path: url.pathname + url.search,
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${config.apiKey}`,
-            'Content-Length': Buffer.byteLength(body)
-        }
+        headers,
     };
 
     const transport = url.protocol === 'https:' ? https : http;
@@ -166,7 +283,7 @@ function streamOpenAI(
             let errorBody = '';
             res.on('data', (chunk) => { errorBody += chunk.toString(); });
             res.on('end', () => {
-                onError(`OpenAI API error (${res.statusCode}): ${errorBody}`);
+                onError(`${providerLabel} API error (${res.statusCode}): ${errorBody}`);
             });
             return;
         }
@@ -182,11 +299,7 @@ function streamOpenAI(
                     const data = line.slice(6).trim();
                     if (data === '[DONE]') { continue; }
                     try {
-                        const event = JSON.parse(data);
-                        const content = event.choices?.[0]?.delta?.content;
-                        if (content) {
-                            onChunk(content);
-                        }
+                        onSseData(data);
                     } catch {
                         // Skip malformed SSE lines
                     }
