@@ -36,3 +36,6 @@ Thumbs.db
 # Documentation (keep markdown files, but ignore generated docs)
 /doc/
 /docs/
+
+# Claude Code
+CLAUDE.md
