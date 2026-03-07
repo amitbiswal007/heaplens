@@ -245,6 +245,22 @@ function streamOpenAICompatible(
     }, onDone, onError);
 }
 
+/**
+ * Non-streaming wrapper: accumulates all chunks and resolves with the full response.
+ */
+export function callLlmFull(config: LlmConfig, messages: ChatMessage[]): Promise<string> {
+    return new Promise((resolve, reject) => {
+        let result = '';
+        streamLlmResponse(
+            config,
+            messages,
+            (chunk) => { result += chunk; },
+            () => { resolve(result); },
+            (error) => { reject(new Error(error)); }
+        );
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------

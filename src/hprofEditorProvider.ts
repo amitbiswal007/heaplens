@@ -9,6 +9,7 @@ import { resolveSource } from './sourceResolver';
 import type { DependencyInfo } from './dependencyResolver';
 import { allHandlers, MessageHandler, EditorState } from './messageHandlers';
 import { friendlyError } from './errorMessages';
+import { executeAiFix } from './aiFixProvider';
 
 /**
  * Custom readonly editor provider for .hprof files.
@@ -85,7 +86,8 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
             chatHistory: savedChat,
             pendingWebviewMessage: null,
             webviewReady: false,
-            dependencyInfoCache: new Map()
+            dependencyInfoCache: new Map(),
+            fixedClasses: new Set()
         };
         this.editors.set(hprofPath, editorState);
 
@@ -553,6 +555,86 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         } catch (error: any) {
             this.outputChannel.appendLine(`[HeapLens] Go to source error for ${className}: ${error.message}`);
             webviewPanel.webview.postMessage({ command: 'sourceNotFound', className });
+        }
+    }
+
+    public async handleFixWithAi(message: any, hprofPath: string, webviewPanel: vscode.WebviewPanel): Promise<void> {
+        const state = this.editors.get(hprofPath);
+        if (!state) { return; }
+
+        const className = message.className;
+
+        // Check if already fixed this session
+        if (state.fixedClasses.has(className)) {
+            webviewPanel.webview.postMessage({
+                command: 'fixWithAiDone',
+                className,
+                status: 'already-fixed'
+            });
+            vscode.window.showInformationMessage(`HeapLens: ${className} was already fixed this session.`);
+            return;
+        }
+
+        const config = vscode.workspace.getConfiguration('heaplens.llm');
+        const llmConfig: LlmConfig = {
+            provider: config.get<string>('provider', 'anthropic'),
+            apiKey: config.get<string>('apiKey', ''),
+            baseUrl: config.get<string>('baseUrl', '') || undefined,
+            model: config.get<string>('model', '') || undefined,
+        };
+
+        try {
+            const result = await executeAiFix(
+                llmConfig,
+                {
+                    className,
+                    retainedSize: message.retainedSize || 0,
+                    retainedPercentage: message.retainedPercentage || 0,
+                    description: message.description || ''
+                },
+                state,
+                this.outputChannel,
+                webviewPanel
+            );
+
+            switch (result.status) {
+                case 'diff-opened':
+                    webviewPanel.webview.postMessage({
+                        command: 'fixWithAiDone',
+                        className,
+                        status: 'diff-opened'
+                    });
+                    break;
+                case 'already-fixed':
+                    webviewPanel.webview.postMessage({
+                        command: 'fixWithAiDone',
+                        className,
+                        status: 'already-fixed'
+                    });
+                    vscode.window.showInformationMessage(`HeapLens: ${result.message}`);
+                    break;
+                case 'source-not-found':
+                    webviewPanel.webview.postMessage({
+                        command: 'fixWithAiError',
+                        className,
+                        message: result.message || 'Source not found'
+                    });
+                    break;
+                case 'error':
+                    webviewPanel.webview.postMessage({
+                        command: 'fixWithAiError',
+                        className,
+                        message: result.message || 'Unknown error'
+                    });
+                    break;
+            }
+        } catch (error: any) {
+            this.outputChannel.appendLine(`[HeapLens] Fix with AI error: ${error.message}`);
+            webviewPanel.webview.postMessage({
+                command: 'fixWithAiError',
+                className,
+                message: error.message || String(error)
+            });
         }
     }
 

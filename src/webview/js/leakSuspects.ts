@@ -54,6 +54,12 @@ export function getLeakSuspectsJs(): string {
                 var sourceLink = isResolvableClass(s.class_name)
                     ? ' | <a class="go-to-source-link" data-class="' + escapeHtml(s.class_name) + '">View Source</a>'
                     : '';
+                var fixLink = isResolvableClass(s.class_name)
+                    ? ' | <a class="fix-with-ai-link" data-class="' + escapeHtml(s.class_name) +
+                      '" data-retained="' + s.retained_size +
+                      '" data-pct="' + s.retained_percentage +
+                      '" data-desc="' + escapeHtml(s.description) + '">Fix with AI</a>'
+                    : '';
                 var gcPathLink = s.object_id
                     ? ' <button class="why-alive-btn gc-path-link" data-object-id="' + s.object_id + '">Why alive?</button>'
                     : '';
@@ -73,7 +79,7 @@ export function getLeakSuspectsJs(): string {
                     '<div class="suspect-desc">' + escapeHtml(s.description) + '</div>' +
                     '<div style="margin-top:8px;opacity:0.6;font-size:12px;">Retained: ' + fmt(s.retained_size) +
                     (s.object_id ? ' | Object ID: ' + s.object_id : '') +
-                    sourceLink + gcPathLink + explainLink + depBadge + '</div>' +
+                    sourceLink + gcPathLink + explainLink + fixLink + depBadge + '</div>' +
                     '<div class="suspect-explain-area" id="explain-' + sanitizedId + '"></div>' +
                     '</div>';
             }).join('');
@@ -122,6 +128,20 @@ export function getLeakSuspectsJs(): string {
                     area.textContent = '';
                     vscode.postMessage({
                         command: 'explainLeakSuspect',
+                        className: link.dataset.class,
+                        retainedSize: parseFloat(link.dataset.retained),
+                        retainedPercentage: parseFloat(link.dataset.pct),
+                        description: link.dataset.desc
+                    });
+                });
+            });
+
+            container.querySelectorAll('.fix-with-ai-link').forEach(function(link) {
+                link.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    if (link.classList.contains('disabled') || link.classList.contains('fixed')) return;
+                    vscode.postMessage({
+                        command: 'fixWithAi',
                         className: link.dataset.class,
                         retainedSize: parseFloat(link.dataset.retained),
                         retainedPercentage: parseFloat(link.dataset.pct),

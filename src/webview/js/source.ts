@@ -72,7 +72,8 @@ export function getSourceJs(): string {
                     '<td class="right">' + fmtNum(e.instance_count) + '</td>' +
                     '<td class="right">' + fmt(e.retained_size) + '</td>' +
                     '<td><span class="source-status ' + status + '"></span>' + statusLabel + badge + '</td>' +
-                    '<td><button class="source-view-btn" data-class="' + escapeHtml(cn) + '"' + btnDisabled + '>View Source</button></td>' +
+                    '<td><button class="source-view-btn" data-class="' + escapeHtml(cn) + '"' + btnDisabled + '>View Source</button>' +
+                    ' <button class="source-fix-btn" data-class="' + escapeHtml(cn) + '">Fix with AI</button></td>' +
                     '</tr>';
             });
             html += '</tbody></table>';
@@ -94,6 +95,21 @@ export function getSourceJs(): string {
                     _srcStatusMap[cn] = 'resolving';
                     _updateSourceRow(cn);
                     vscode.postMessage({ command: 'goToSource', className: cn });
+                });
+            });
+
+            container.querySelectorAll('.source-fix-btn').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    if (btn.disabled || btn.classList.contains('fixed')) return;
+                    var cn = btn.dataset.class;
+                    var entry = _srcHistogram.find(function(e) { return e.class_name === cn; });
+                    vscode.postMessage({
+                        command: 'fixWithAi',
+                        className: cn,
+                        retainedSize: entry ? entry.retained_size : 0,
+                        retainedPercentage: 0,
+                        description: 'Class ' + cn + ' with ' + (entry ? entry.instance_count : 0) + ' instances'
+                    });
                 });
             });
         }

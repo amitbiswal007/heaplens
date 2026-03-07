@@ -155,6 +155,47 @@ export function buildObjectExplainPrompt(heapContext: string, info: ObjectExplai
         `Be specific and actionable. A junior developer should be able to follow your advice.`;
 }
 
+// ---------------------------------------------------------------------------
+// AI Fix prompt (Fix with AI feature)
+// ---------------------------------------------------------------------------
+
+export const AI_FIX_SYSTEM_PROMPT = `You are HeapLens Fix, a specialist at fixing Java memory leaks. You receive a Java source file and heap analysis context describing a memory leak.
+
+Rules:
+1. Return ONLY the complete fixed Java source file — no explanations, no markdown fences, no preamble.
+2. If the code already handles the leak correctly (e.g., resources are closed, caches are bounded, references are cleared), respond with exactly: <<<ALREADY_FIXED>>>
+3. Preserve all existing functionality — do NOT remove features or change public API signatures.
+4. Add a comment "// HEAPLENS FIX: <brief description>" next to every line you change or add.
+5. Do NOT add new third-party dependencies. Only use classes already imported or from the JDK.
+6. Minimize changes — fix only the leak, nothing else. Do not reformat, refactor, or "improve" unrelated code.
+7. Common fix patterns:
+   - Add try-with-resources or explicit close() for unclosed streams/connections
+   - Add size bounds or eviction to unbounded caches/maps
+   - Use WeakReference/SoftReference for caches that should not prevent GC
+   - Clear static collections in shutdown hooks or lifecycle methods
+   - Remove unnecessary static references
+   - Close database connections/statements/result sets in finally blocks
+8. The output must be valid, compilable Java.`;
+
+export interface AiFixInfo {
+    className: string;
+    retainedSize: number;
+    retainedPercentage: number;
+    description: string;
+    sourceCode: string;
+    filePath: string;
+}
+
+export function buildAiFixPrompt(heapContext: string, info: AiFixInfo): string {
+    return `Heap analysis context:\n${heapContext}\n\n` +
+        `Leak suspect: ${info.className}\n` +
+        `Retained size: ${info.retainedSize} bytes (${info.retainedPercentage.toFixed(1)}% of heap)\n` +
+        `Description: ${info.description}\n` +
+        `File: ${info.filePath}\n\n` +
+        `Source code:\n\`\`\`java\n${info.sourceCode}\n\`\`\`\n\n` +
+        `Fix the memory leak in this file. Return ONLY the complete fixed Java source file, or <<<ALREADY_FIXED>>> if no fix is needed.`;
+}
+
 export interface LeakSuspectExplainInfo {
     className: string;
     retainedSize: number;

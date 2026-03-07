@@ -1446,5 +1446,49 @@ export function getStyles(): string {
             outline-offset: -1px;
         }
         .tree-show-more:focus-visible { outline-offset: -2px; border-radius: 3px; }
+
+        /* Fix with AI */
+        .fix-with-ai-link {
+            cursor: pointer;
+            color: var(--vscode-textLink-foreground);
+            text-decoration: none;
+            margin-left: 8px;
+        }
+        .fix-with-ai-link:hover { text-decoration: underline; }
+        .fix-with-ai-link.disabled {
+            opacity: 0.5;
+            cursor: wait;
+            pointer-events: none;
+        }
+        .fix-with-ai-link.fixed {
+            color: var(--vscode-testing-iconPassed, #388a34);
+            pointer-events: none;
+        }
+        .tree-fix {
+            margin-left: 6px;
+            flex-shrink: 0;
+            cursor: pointer;
+            opacity: 0;
+            font-size: 12px;
+            transition: opacity 0.15s;
+        }
+        .tree-row:hover .tree-fix { opacity: 0.6; }
+        .tree-fix:hover { opacity: 1 !important; }
+        .source-fix-btn {
+            padding: 3px 10px;
+            background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
+            color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 11px;
+            margin-left: 4px;
+        }
+        .source-fix-btn:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground)); }
+        .source-fix-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .source-fix-btn.fixed {
+            background: var(--vscode-testing-iconPassed, #388a34);
+            color: #fff;
+        }
     `;
 }

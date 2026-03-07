@@ -135,5 +135,88 @@ export function getHelperJs(): string {
         onMessage('sourceNotFound', function(msg) {
             showSourceToast(msg.className);
         });
+
+        // ---- Fix with AI cross-cutting handlers ----
+        onMessage('fixWithAiStarted', function(msg) {
+            document.querySelectorAll('.fix-with-ai-link[data-class="' + msg.className + '"]').forEach(function(link) {
+                link.textContent = 'Generating fix...';
+                link.classList.add('disabled');
+            });
+            document.querySelectorAll('.source-fix-btn[data-class="' + msg.className + '"]').forEach(function(btn) {
+                btn.textContent = 'Generating...';
+                btn.disabled = true;
+            });
+            document.querySelectorAll('.tree-fix[data-class="' + msg.className + '"]').forEach(function(el) {
+                el.style.opacity = '0.3';
+                el.style.pointerEvents = 'none';
+            });
+        });
+
+        onMessage('fixWithAiDone', function(msg) {
+            if (msg.status === 'already-fixed') {
+                document.querySelectorAll('.fix-with-ai-link[data-class="' + msg.className + '"]').forEach(function(link) {
+                    link.textContent = 'Already Fixed \\u2714';
+                    link.classList.add('fixed');
+                    link.classList.remove('disabled');
+                });
+                document.querySelectorAll('.source-fix-btn[data-class="' + msg.className + '"]').forEach(function(btn) {
+                    btn.textContent = 'Already Fixed \\u2714';
+                    btn.disabled = true;
+                    btn.classList.add('fixed');
+                });
+                document.querySelectorAll('.tree-fix[data-class="' + msg.className + '"]').forEach(function(el) {
+                    el.textContent = '\\u2714';
+                    el.style.opacity = '0.6';
+                    el.style.pointerEvents = 'none';
+                    el.title = 'Already fixed';
+                });
+            } else {
+                document.querySelectorAll('.fix-with-ai-link[data-class="' + msg.className + '"]').forEach(function(link) {
+                    link.textContent = 'Fix with AI';
+                    link.classList.remove('disabled');
+                });
+                document.querySelectorAll('.source-fix-btn[data-class="' + msg.className + '"]').forEach(function(btn) {
+                    btn.textContent = 'Fix with AI';
+                    btn.disabled = false;
+                });
+                document.querySelectorAll('.tree-fix[data-class="' + msg.className + '"]').forEach(function(el) {
+                    el.style.opacity = '';
+                    el.style.pointerEvents = '';
+                });
+            }
+        });
+
+        onMessage('fixWithAiError', function(msg) {
+            document.querySelectorAll('.fix-with-ai-link[data-class="' + msg.className + '"]').forEach(function(link) {
+                link.textContent = 'Fix with AI';
+                link.classList.remove('disabled');
+            });
+            document.querySelectorAll('.source-fix-btn[data-class="' + msg.className + '"]').forEach(function(btn) {
+                btn.textContent = 'Fix with AI';
+                btn.disabled = false;
+            });
+            document.querySelectorAll('.tree-fix[data-class="' + msg.className + '"]').forEach(function(el) {
+                el.style.opacity = '';
+                el.style.pointerEvents = '';
+            });
+        });
+
+        onMessage('classFixed', function(msg) {
+            document.querySelectorAll('.fix-with-ai-link[data-class="' + msg.className + '"]').forEach(function(link) {
+                link.textContent = 'Fixed \\u2714';
+                link.classList.add('fixed');
+            });
+            document.querySelectorAll('.source-fix-btn[data-class="' + msg.className + '"]').forEach(function(btn) {
+                btn.textContent = 'Fixed \\u2714';
+                btn.disabled = true;
+                btn.classList.add('fixed');
+            });
+            document.querySelectorAll('.tree-fix[data-class="' + msg.className + '"]').forEach(function(el) {
+                el.textContent = '\\u2714';
+                el.style.opacity = '0.6';
+                el.style.pointerEvents = 'none';
+                el.title = 'Fixed';
+            });
+        });
     `;
 }

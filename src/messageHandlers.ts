@@ -13,6 +13,7 @@ export interface EditorState {
     pendingWebviewMessage: any;
     webviewReady: boolean;
     dependencyInfoCache: Map<string, { tier: string; dependency?: DependencyInfo }>;
+    fixedClasses: Set<string>;
 }
 
 export interface HandlerContext {
@@ -26,6 +27,7 @@ export interface HandlerContext {
         handleGoToSource(className: string, hprofPath: string, webviewPanel: vscode.WebviewPanel): Promise<void>;
         handleCopyReport(hprofPath: string, webviewPanel: vscode.WebviewPanel): void;
         clearChatHistory(hprofPath: string): void;
+        handleFixWithAi(message: any, hprofPath: string, webviewPanel: vscode.WebviewPanel): Promise<void>;
     };
 }
 
@@ -521,6 +523,30 @@ const listAllAnalyzedFilesHandler: MessageHandler = {
     }
 };
 
+const fixWithAiHandler: MessageHandler = {
+    command: 'fixWithAi',
+    async handle(message, ctx) {
+        const config = vscode.workspace.getConfiguration('heaplens.llm');
+        const apiKey = config.get<string>('apiKey', '');
+
+        if (!apiKey && config.get<string>('provider', 'anthropic') !== 'ollama') {
+            ctx.webviewPanel.webview.postMessage({
+                command: 'fixWithAiError',
+                className: message.className,
+                message: 'No API key configured. Go to Settings and search for "heaplens.llm.apiKey" to set your API key.'
+            });
+            return;
+        }
+
+        ctx.webviewPanel.webview.postMessage({
+            command: 'fixWithAiStarted',
+            className: message.className
+        });
+
+        await ctx.provider.handleFixWithAi(message, ctx.hprofPath, ctx.webviewPanel);
+    }
+};
+
 export const allHandlers: MessageHandler[] = [
     getChildrenHandler,
     getReferrersHandler,
@@ -540,6 +566,7 @@ export const allHandlers: MessageHandler[] = [
     retryAnalysisHandler,
     exportHistogramCsvHandler,
     clearChatHistoryHandler,
+    fixWithAiHandler,
     getDominatorSubtreeHandler,
     getTimelineDataHandler,
     listAllAnalyzedFilesHandler,

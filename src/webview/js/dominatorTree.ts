@@ -94,6 +94,7 @@ export function getDominatorTreeJs(): string {
                 '<span class="tree-action-slot tree-action-alive">' + (showPin ? '<button class="why-alive-btn" title="Show GC root path">Why alive?</button>' : '') + '</span>' +
                 '<span class="tree-action-slot tree-action-icon">' + (showInspect ? '<span class="tree-inspect" role="button" aria-label="Inspect fields for ' + escapeHtml(displayName) + '" title="Inspect fields">\\uD83D\\uDD0D</span>' : '') + '</span>' +
                 '<span class="tree-action-slot tree-action-icon">' + (showSource ? '<span class="tree-source" role="button" aria-label="Go to source for ' + escapeHtml(displayName) + '" title="Go to source">\\u2197</span>' : '') + '</span>' +
+                '<span class="tree-action-slot tree-action-icon">' + (showSource ? '<span class="tree-fix" role="button" data-class="' + escapeHtml(displayName) + '" aria-label="Fix with AI for ' + escapeHtml(displayName) + '" title="Fix with AI">\\uD83D\\uDD27</span>' : '') + '</span>' +
                 '<span class="tree-action-slot tree-action-icon">' + (showRefs ? '<span class="tree-refs" role="button" aria-label="Show referrers for ' + escapeHtml(displayName) + '" title="Show referrers">\\u2190</span>' : '') + '</span>' +
                 depBadge +
                 '</span>';
@@ -132,6 +133,17 @@ export function getDominatorTreeJs(): string {
                 row.querySelector('.tree-source').addEventListener('click', function(e) {
                     e.stopPropagation();
                     vscode.postMessage({ command: 'goToSource', className: displayName });
+                });
+
+                row.querySelector('.tree-fix').addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    vscode.postMessage({
+                        command: 'fixWithAi',
+                        className: displayName,
+                        retainedSize: obj.retained_size,
+                        retainedPercentage: _totalRetained > 0 ? (obj.retained_size / _totalRetained) * 100 : 0,
+                        description: 'Object ' + displayName + ' retaining ' + fmt(obj.retained_size) + ' in dominator tree'
+                    });
                 });
             }
 
