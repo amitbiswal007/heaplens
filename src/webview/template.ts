@@ -10,6 +10,7 @@ export function getHtmlTemplate(): string {
         <button class="tab-btn" data-tab="query" role="tab" aria-selected="false" aria-controls="tab-query" id="tabBtn-query" tabindex="-1">Query</button>
         <button class="tab-btn" data-tab="compare" role="tab" aria-selected="false" aria-controls="tab-compare" id="tabBtn-compare" tabindex="-1">Compare</button>
         <button class="tab-btn" data-tab="timeline" role="tab" aria-selected="false" aria-controls="tab-timeline" id="tabBtn-timeline" tabindex="-1">Timeline</button>
+        <button class="tab-btn" data-tab="monitor" role="tab" aria-selected="false" aria-controls="tab-monitor" id="tabBtn-monitor" tabindex="-1">Monitor</button>
         <button class="tab-btn" data-tab="chat" role="tab" aria-selected="false" aria-controls="tab-chat" id="tabBtn-chat" tabindex="-1">AI Chat</button>
     </div>
 
@@ -177,6 +178,63 @@ export function getHtmlTemplate(): string {
             <button class="btn" id="timeline-build-btn" disabled>Build Timeline</button>
         </div>
         <div id="timeline-charts"></div>
+    </div>
+
+    <!-- Tab: Monitor -->
+    <div id="tab-monitor" class="tab-content" role="tabpanel" aria-labelledby="tabBtn-monitor">
+        <div class="monitor-controls">
+            <div class="monitor-connection-row">
+                <label for="monitor-host">Host:</label>
+                <input type="text" id="monitor-host" class="monitor-input" value="localhost" placeholder="localhost">
+                <label for="monitor-port">Port:</label>
+                <input type="number" id="monitor-port" class="monitor-input monitor-port-input" value="9095" min="1" max="65535">
+                <button class="btn" id="monitor-connect-btn">Connect</button>
+                <button class="btn" id="monitor-disconnect-btn" disabled>Disconnect</button>
+                <span class="monitor-status">
+                    <span class="monitor-status-dot monitor-status-disconnected" id="monitor-status-dot"></span>
+                    <span id="monitor-status-text">Not connected</span>
+                </span>
+            </div>
+        </div>
+        <div class="monitor-stats-grid" id="monitor-stats-grid">
+            <div class="monitor-stat-card">
+                <div class="monitor-stat-label">Heap Used</div>
+                <div class="monitor-stat-value" id="monitor-heap-used">--</div>
+            </div>
+            <div class="monitor-stat-card">
+                <div class="monitor-stat-label">Heap Max</div>
+                <div class="monitor-stat-value" id="monitor-heap-max">--</div>
+            </div>
+            <div class="monitor-stat-card">
+                <div class="monitor-stat-label">Heap %</div>
+                <div class="monitor-stat-value" id="monitor-heap-pct">--</div>
+            </div>
+            <div class="monitor-stat-card">
+                <div class="monitor-stat-label">Threads</div>
+                <div class="monitor-stat-value" id="monitor-threads">--</div>
+            </div>
+            <div class="monitor-stat-card">
+                <div class="monitor-stat-label">Uptime</div>
+                <div class="monitor-stat-value" id="monitor-uptime">--</div>
+            </div>
+            <div class="monitor-stat-card">
+                <div class="monitor-stat-label">Non-Heap</div>
+                <div class="monitor-stat-value" id="monitor-non-heap">--</div>
+            </div>
+        </div>
+        <div class="monitor-charts-row">
+            <div class="monitor-gauge-container" id="monitor-gauge"></div>
+            <div class="monitor-line-container" id="monitor-line-chart"></div>
+        </div>
+        <div class="monitor-gc-section">
+            <div class="section-title">GC Collectors</div>
+            <div id="monitor-gc-stats"><div style="opacity:0.5;">Connect to view GC stats</div></div>
+        </div>
+        <div class="monitor-histogram-section">
+            <div class="section-title">Class Histogram (On-Demand)</div>
+            <button class="btn" id="monitor-histogram-btn" disabled>Snapshot Histogram</button>
+            <div id="monitor-histogram-table"></div>
+        </div>
     </div>
 
     <!-- Tab 9: AI Chat -->

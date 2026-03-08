@@ -1490,5 +1490,109 @@ export function getStyles(): string {
             background: var(--vscode-testing-iconPassed, #388a34);
             color: #fff;
         }
+
+        /* ---- Monitor Tab ---- */
+        .monitor-controls {
+            padding: var(--hl-space-md) var(--hl-space-lg);
+            border-bottom: 1px solid var(--vscode-panel-border);
+        }
+        .monitor-connection-row {
+            display: flex;
+            align-items: center;
+            gap: var(--hl-space-sm);
+            flex-wrap: wrap;
+        }
+        .monitor-connection-row label {
+            font-size: 13px;
+            opacity: 0.8;
+        }
+        .monitor-input {
+            padding: 4px 8px;
+            background: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+            border-radius: 3px;
+            font-size: 13px;
+            width: 120px;
+        }
+        .monitor-port-input { width: 70px; }
+        .monitor-status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-left: var(--hl-space-sm);
+            font-size: 12px;
+            opacity: 0.8;
+        }
+        .monitor-status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .monitor-status-disconnected { background: var(--vscode-editorWidget-border, #555); }
+        .monitor-status-connecting { background: #f39c12; }
+        .monitor-status-connected { background: #27ae60; }
+        .monitor-status-error { background: #e74c3c; }
+
+        .monitor-stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            gap: var(--hl-space-md);
+            padding: var(--hl-space-lg);
+        }
+        .monitor-stat-card {
+            background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 6px;
+            padding: var(--hl-space-md);
+            text-align: center;
+        }
+        .monitor-stat-label {
+            font-size: 11px;
+            opacity: 0.6;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 4px;
+        }
+        .monitor-stat-value {
+            font-size: 20px;
+            font-weight: bold;
+            font-family: var(--vscode-editor-font-family, monospace);
+        }
+
+        .monitor-charts-row {
+            display: flex;
+            gap: var(--hl-space-lg);
+            padding: 0 var(--hl-space-lg) var(--hl-space-lg);
+            flex-wrap: wrap;
+        }
+        .monitor-gauge-container {
+            flex: 0 0 200px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .monitor-line-container {
+            flex: 1 1 300px;
+            min-height: 200px;
+        }
+
+        .monitor-gc-section,
+        .monitor-histogram-section {
+            padding: 0 var(--hl-space-lg) var(--hl-space-lg);
+        }
+        .monitor-gc-row {
+            display: flex;
+            gap: var(--hl-space-lg);
+            padding: 6px 0;
+            border-bottom: 1px solid var(--vscode-panel-border);
+            font-size: 13px;
+        }
+        .monitor-gc-name { font-weight: 600; min-width: 150px; }
+        .monitor-gc-count { opacity: 0.8; }
+        .monitor-gc-time { opacity: 0.8; }
+
+        .monitor-histogram { margin-top: var(--hl-space-md); }
     `;
 }
