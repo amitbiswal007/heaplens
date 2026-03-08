@@ -8,6 +8,8 @@ import { HEAP_ANALYSIS_SYSTEM_PROMPT, buildAnalyzePrompt, sanitizeChatInput } fr
 import { resolveSource } from './sourceResolver';
 import type { DependencyInfo } from './dependencyResolver';
 import { allHandlers, MessageHandler, EditorState } from './messageHandlers';
+import { monitorHandlers } from './monitorHandlers';
+import { MonitorService } from './monitorService';
 import { friendlyError } from './errorMessages';
 import { executeAiFix } from './aiFixProvider';
 import { trackEvent, classifyError } from './telemetry';
@@ -24,7 +26,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
     private static readonly MAX_CHAT_HISTORY = 40; // 20 user + 20 assistant messages
 
     private static handlerMap = new Map<string, MessageHandler>(
-        allHandlers.map(h => [h.command, h])
+        [...allHandlers, ...monitorHandlers].map(h => [h.command, h])
     );
 
     private outputChannel: vscode.OutputChannel;
@@ -36,6 +38,8 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
     private heartbeatIntervals = new Map<string, ReturnType<typeof setInterval>>();
     /** Per-editor heartbeat failure counts. */
     private heartbeatFailures = new Map<string, number>();
+    /** Active monitor service (one per extension, not per-editor). */
+    private monitorService: MonitorService | null = null;
 
     constructor(
         private readonly context: vscode.ExtensionContext,
@@ -713,6 +717,48 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         return this.activeHprofPath;
     }
 
+    public getMonitorService(): MonitorService | null {
+        return this.monitorService;
+    }
+
+    /**
+     * Starts the monitor from a command palette invocation.
+     * Sends a startMonitor message to the active webview so the handler picks it up.
+     */
+    public startMonitorFromCommand(host: string, port: number): void {
+        const panel = this.getActiveWebviewPanel();
+        if (!panel) {
+            vscode.window.showWarningMessage('HeapLens: Open an HPROF file first to use the Monitor tab.');
+            return;
+        }
+        // Simulate the webview sending a startMonitor message by dispatching it
+        // through the handler system directly
+        const state = this.activeHprofPath ? this.editors.get(this.activeHprofPath) : undefined;
+        if (!state) { return; }
+        const handler = HprofEditorProvider.handlerMap.get('startMonitor');
+        if (handler) {
+            handler.handle(
+                { command: 'startMonitor', host, port },
+                {
+                    hprofPath: this.activeHprofPath!,
+                    state,
+                    webviewPanel: panel,
+                    client: state.client,
+                    outputChannel: this.outputChannel,
+                    provider: this
+                }
+            );
+        }
+    }
+
+    public setMonitorService(service: MonitorService | null): void {
+        // Dispose previous if replacing
+        if (this.monitorService && this.monitorService !== service) {
+            this.monitorService.dispose();
+        }
+        this.monitorService = service;
+    }
+
     private startHeartbeat(hprofPath: string, client: RustClient): void {
         this.stopHeartbeat(hprofPath);
         this.heartbeatFailures.set(hprofPath, 0);
@@ -752,6 +798,11 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
     }
 
     public dispose(): void {
+        // Dispose monitor service
+        if (this.monitorService) {
+            this.monitorService.dispose();
+            this.monitorService = null;
+        }
         // Dispose all per-editor clients and heartbeats
         for (const [hprofPath, state] of this.editors) {
             this.stopHeartbeat(hprofPath);

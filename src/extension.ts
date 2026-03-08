@@ -118,6 +118,31 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    // Command: Start JVM Monitor (convenience — can also connect from the Monitor tab UI)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('heaplens.startMonitor', async () => {
+            if (!editorProvider) {
+                vscode.window.showWarningMessage('HeapLens: Open an HPROF file first, then use the Monitor tab to connect.');
+                return;
+            }
+
+            const defaultPort = vscode.workspace.getConfiguration('heaplens.monitor')
+                .get<number>('defaultPort', 9095);
+            const input = await vscode.window.showInputBox({
+                prompt: 'Enter agent address (host:port)',
+                value: `localhost:${defaultPort}`,
+                placeHolder: 'localhost:9095'
+            });
+            if (!input) { return; }
+
+            const parts = input.split(':');
+            const host = parts[0] || 'localhost';
+            const port = parseInt(parts[1] || String(defaultPort), 10);
+
+            editorProvider.startMonitorFromCommand(host, port);
+        })
+    );
+
     // Cleanup
     context.subscriptions.push({
         dispose: () => {

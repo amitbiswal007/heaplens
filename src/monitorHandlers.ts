@@ -1,4 +1,4 @@
-import { MessageHandler, HandlerContext } from './messageHandlers';
+import { MessageHandler } from './messageHandlers';
 import { MonitorService, MonitorConfig } from './monitorService';
 import * as vscode from 'vscode';
 
