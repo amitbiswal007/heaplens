@@ -2,7 +2,7 @@
   "name": "heaplens",
   "displayName": "HeapLens",
   "description": "LLM-powered Java heap dump analyzer — dominator tree, leak detection, HeapQL queries, AI chat, and interactive D3.js visualizations for .hprof files",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "guptasachinn",
   "license": "Apache-2.0",
   "icon": "icon.png",
@@ -95,8 +95,30 @@
       "properties": {
         "heaplens.llm.provider": {
           "type": "string",
-          "enum": ["anthropic", "openai", "gemini", "deepseek", "mistral", "groq", "xai", "together", "openrouter", "ollama"],
-          "enumItemLabels": ["Anthropic (Claude)", "OpenAI (GPT)", "Google Gemini", "DeepSeek", "Mistral", "Groq", "xAI (Grok)", "Together AI", "OpenRouter", "Ollama (Local)"],
+          "enum": [
+            "anthropic",
+            "openai",
+            "gemini",
+            "deepseek",
+            "mistral",
+            "groq",
+            "xai",
+            "together",
+            "openrouter",
+            "ollama"
+          ],
+          "enumItemLabels": [
+            "Anthropic (Claude)",
+            "OpenAI (GPT)",
+            "Google Gemini",
+            "DeepSeek",
+            "Mistral",
+            "Groq",
+            "xAI (Grok)",
+            "Together AI",
+            "OpenRouter",
+            "Ollama (Local)"
+          ],
           "default": "anthropic",
           "description": "LLM provider for the AI Chat tab"
         },
