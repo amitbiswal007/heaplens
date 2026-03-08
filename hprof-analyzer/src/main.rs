@@ -1676,7 +1676,15 @@ async fn handle_execute_query_request(
     let analysis_state = state_guard.as_ref()
         .ok_or_else(|| anyhow::anyhow!("Analysis state not available"))?;
 
-    let response = match analysis_state.execute_query(query) {
+    // Support optional server-side pagination
+    let page = params.get("page").and_then(|v| v.as_u64());
+    let page_size = params.get("page_size").and_then(|v| v.as_u64()).unwrap_or(500);
+
+    let response = match if let Some(p) = page {
+        analysis_state.execute_query_paged(query, p, page_size)
+    } else {
+        analysis_state.execute_query(query)
+    } {
         Ok(result) => serde_json::json!({
             "jsonrpc": "2.0",
             "id": request_id,

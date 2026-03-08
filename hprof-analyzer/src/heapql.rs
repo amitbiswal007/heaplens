@@ -64,6 +64,12 @@ enum Token {
     Comma,
     LParen,
     RParen,
+    Join,
+    Inner,
+    Left,
+    On,
+    As,
+    In,
     Colon,
     Eof,
 }
@@ -111,6 +117,8 @@ pub struct SelectStatement {
     pub columns: Vec<String>,
     pub select_columns: Vec<SelectColumn>,
     pub table: TableName,
+    pub table_alias: Option<String>,
+    pub join: Option<JoinClause>,
     pub where_clause: Option<WhereClause>,
     pub order_by: Option<OrderBy>,
     pub limit: Option<u64>,
@@ -137,6 +145,26 @@ impl std::fmt::Display for TableName {
 }
 
 #[derive(Debug, Clone)]
+pub struct TableRef {
+    pub table: TableName,
+    pub alias: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum JoinKind {
+    Inner,
+    Left,
+}
+
+#[derive(Debug, Clone)]
+pub struct JoinClause {
+    pub right: TableRef,
+    pub kind: JoinKind,
+    pub on_left_col: String,
+    pub on_right_col: String,
+}
+
+#[derive(Debug, Clone)]
 pub enum WhereClause {
     Condition(Condition),
     And(Box<WhereClause>, Box<WhereClause>),
@@ -159,6 +187,7 @@ pub enum CompOp {
     Gte,
     Lte,
     Like,
+    In,
 }
 
 #[derive(Debug, Clone)]
@@ -166,6 +195,8 @@ pub enum Value {
     String(String),
     Int(u64),
     Float(f64),
+    Subquery(Box<SelectStatement>),
+    ResolvedSet(Vec<serde_json::Value>),
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +224,12 @@ pub struct QueryResult {
     pub total_scanned: u64,
     pub total_matched: u64,
     pub execution_time_ms: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_pages: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_rows: Option<u64>,
 }
 
 // ============================================================================
@@ -373,6 +410,12 @@ impl Tokenizer {
             "MIN" => Token::Min,
             "MAX" => Token::Max,
             "GROUP" => Token::Group,
+            "JOIN" => Token::Join,
+            "INNER" => Token::Inner,
+            "LEFT" => Token::Left,
+            "ON" => Token::On,
+            "AS" => Token::As,
+            "IN" => Token::In,
             _ => Token::Ident(word),
         }
     }
@@ -453,6 +496,12 @@ impl Parser {
         self.expect(&Token::From)?;
         let table = self.parse_table_name()?;
 
+        // Optional alias (AS alias or bare identifier)
+        let table_alias = self.parse_optional_alias()?;
+
+        // Optional JOIN
+        let join = self.parse_optional_join()?;
+
         // Optional WHERE
         let where_clause = if matches!(self.peek(), Token::Where) {
             self.advance();
@@ -494,6 +543,8 @@ impl Parser {
             columns,
             select_columns,
             table,
+            table_alias,
+            join,
             where_clause,
             order_by,
             limit,
@@ -567,6 +618,60 @@ impl Parser {
         }
     }
 
+    /// Parse optional alias: `AS alias` or bare identifier (if short and not a keyword).
+    fn parse_optional_alias(&mut self) -> Result<Option<String>, HeapQlError> {
+        if matches!(self.peek(), Token::As) {
+            self.advance(); // consume AS
+            let name = self.parse_column_name()?;
+            return Ok(Some(name));
+        }
+        // Bare alias: short identifier that isn't a keyword
+        if let Token::Ident(ref s) = self.peek().clone() {
+            if s.len() <= 3 && !s.contains('.') {
+                let alias = s.clone();
+                self.advance();
+                return Ok(Some(alias));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Parse optional JOIN clause: `[INNER|LEFT] JOIN table [AS alias] ON col = col`
+    fn parse_optional_join(&mut self) -> Result<Option<JoinClause>, HeapQlError> {
+        let kind = match self.peek() {
+            Token::Join => {
+                self.advance();
+                JoinKind::Inner
+            }
+            Token::Inner => {
+                self.advance();
+                self.expect(&Token::Join)?;
+                JoinKind::Inner
+            }
+            Token::Left => {
+                self.advance();
+                self.expect(&Token::Join)?;
+                JoinKind::Left
+            }
+            _ => return Ok(None),
+        };
+
+        let table = self.parse_table_name()?;
+        let alias = self.parse_optional_alias()?;
+
+        self.expect(&Token::On)?;
+        let left_col = self.parse_column_name()?;
+        self.expect(&Token::Eq)?;
+        let right_col = self.parse_column_name()?;
+
+        Ok(Some(JoinClause {
+            right: TableRef { table, alias },
+            kind,
+            on_left_col: left_col,
+            on_right_col: right_col,
+        }))
+    }
+
     fn parse_where(&mut self) -> Result<WhereClause, HeapQlError> {
         let left = self.parse_condition()?;
         self.parse_where_rest(left)
@@ -592,6 +697,23 @@ impl Parser {
 
     fn parse_condition(&mut self) -> Result<WhereClause, HeapQlError> {
         let column = self.parse_column_name()?;
+
+        // IN (SELECT ...) or IN (values)
+        if matches!(self.peek(), Token::In) {
+            self.advance(); // consume IN
+            self.expect(&Token::LParen)?;
+            if matches!(self.peek(), Token::Select) {
+                let inner = self.parse_select_inner()?;
+                self.expect(&Token::RParen)?;
+                return Ok(WhereClause::Condition(Condition {
+                    column,
+                    op: CompOp::In,
+                    value: Value::Subquery(Box::new(inner)),
+                }));
+            }
+            return Err(HeapQlError::Parse("Expected SELECT after IN (".into()));
+        }
+
         let (op, value) = if matches!(self.peek(), Token::Like) {
             self.advance();
             match self.advance() {
@@ -608,15 +730,42 @@ impl Parser {
                 Token::Lte => CompOp::Lte,
                 other => return Err(HeapQlError::Parse(format!("Expected operator, got {:?}", other))),
             };
-            let value = match self.advance() {
-                Token::StringLit(s) => Value::String(s),
-                Token::IntLit(n) => Value::Int(n),
-                Token::FloatLit(f) => Value::Float(f),
-                other => return Err(HeapQlError::Parse(format!("Expected value, got {:?}", other))),
+            // Check for (SELECT ...) as scalar subquery
+            let value = if matches!(self.peek(), Token::LParen) {
+                let saved = self.pos;
+                self.advance(); // consume (
+                if matches!(self.peek(), Token::Select) {
+                    let inner = self.parse_select_inner()?;
+                    self.expect(&Token::RParen)?;
+                    Value::Subquery(Box::new(inner))
+                } else {
+                    self.pos = saved;
+                    self.parse_literal_value()?
+                }
+            } else {
+                self.parse_literal_value()?
             };
             (op, value)
         };
         Ok(WhereClause::Condition(Condition { column, op, value }))
+    }
+
+    fn parse_literal_value(&mut self) -> Result<Value, HeapQlError> {
+        match self.advance() {
+            Token::StringLit(s) => Ok(Value::String(s)),
+            Token::IntLit(n) => Ok(Value::Int(n)),
+            Token::FloatLit(f) => Ok(Value::Float(f)),
+            other => Err(HeapQlError::Parse(format!("Expected value, got {:?}", other))),
+        }
+    }
+
+    /// Parse a SELECT statement without consuming the leading position (reuses parse_select logic).
+    fn parse_select_inner(&mut self) -> Result<SelectStatement, HeapQlError> {
+        let stmt = self.parse_select()?;
+        match stmt {
+            Statement::Select(s) => Ok(s),
+            _ => Err(HeapQlError::Parse("Expected SELECT statement in subquery".into())),
+        }
     }
 
     fn parse_order_by(&mut self) -> Result<OrderBy, HeapQlError> {
@@ -730,6 +879,22 @@ fn eval_condition(row: &Row, columns: &[String], cond: &Condition) -> bool {
             };
             like_match(row_str, pattern)
         }
+        CompOp::In => {
+            // IN with resolved set
+            if let Value::ResolvedSet(ref set) = cond.value {
+                set.iter().any(|sv| {
+                    match (&val, sv) {
+                        (serde_json::Value::String(a), serde_json::Value::String(b)) => a == b,
+                        (serde_json::Value::Number(a), serde_json::Value::Number(b)) => {
+                            a.as_f64().unwrap_or(0.0) == b.as_f64().unwrap_or(0.0)
+                        }
+                        _ => val == *sv,
+                    }
+                })
+            } else {
+                false
+            }
+        }
         op => {
             let ordering = match &cond.value {
                 Value::Int(n) => {
@@ -753,6 +918,7 @@ fn eval_condition(row: &Row, columns: &[String], cond: &Condition) -> bool {
                     };
                     row_str.cmp(s.as_str())
                 }
+                _ => return false,
             };
             match op {
                 CompOp::Eq => ordering == std::cmp::Ordering::Equal,
@@ -761,7 +927,7 @@ fn eval_condition(row: &Row, columns: &[String], cond: &Condition) -> bool {
                 CompOp::Lt => ordering == std::cmp::Ordering::Less,
                 CompOp::Gte => ordering != std::cmp::Ordering::Less,
                 CompOp::Lte => ordering != std::cmp::Ordering::Greater,
-                CompOp::Like => unreachable!(),
+                CompOp::Like | CompOp::In => unreachable!(),
             }
         }
     }
@@ -809,7 +975,259 @@ impl AnalysisState {
         Ok(result)
     }
 
-    fn execute_select(&self, stmt: SelectStatement, start: Instant) -> Result<QueryResult, HeapQlError> {
+    /// Scan all rows from a table, returning (columns, rows).
+    fn scan_table(&self, table: &TableName) -> (Vec<String>, Vec<Row>) {
+        let cols: Vec<String> = table_columns(table).iter().map(|s| s.to_string()).collect();
+        let mut rows = Vec::new();
+        match table {
+            TableName::Instances => {
+                for (i, (obj_id, node_type, class_name)) in self.node_data_map.iter().enumerate() {
+                    if *node_type == "SuperRoot" || *node_type == "Root" || *node_type == "Class" {
+                        continue;
+                    }
+                    let retained = self.retained_sizes.get(i).copied().unwrap_or(0);
+                    if retained == 0 { continue; }
+                    let shallow = self.shallow_sizes.get(i).copied().unwrap_or(0);
+                    rows.push(vec![
+                        serde_json::json!(*obj_id),
+                        serde_json::json!(*node_type),
+                        serde_json::json!(class_name.as_ref()),
+                        serde_json::json!(shallow),
+                        serde_json::json!(retained),
+                    ]);
+                }
+            }
+            TableName::ClassHistogram => {
+                for entry in &self.class_histogram {
+                    rows.push(vec![
+                        serde_json::json!(&entry.class_name),
+                        serde_json::json!(entry.instance_count),
+                        serde_json::json!(entry.shallow_size),
+                        serde_json::json!(entry.retained_size),
+                    ]);
+                }
+            }
+            TableName::DominatorTree => {
+                // Full scan of dominator tree children from super_root
+                fn collect_all(state: &crate::AnalysisState, idx: petgraph::graph::NodeIndex, rows: &mut Vec<Row>) {
+                    if let Some(children) = state.children_map.get(&idx) {
+                        for &child in children {
+                            let i = child.index();
+                            if i >= state.node_data_map.len() { continue; }
+                            let (obj_id, node_type, ref class_name) = state.node_data_map[i];
+                            if node_type == "Class" { continue; }
+                            let retained = state.retained_sizes.get(i).copied().unwrap_or(0);
+                            if retained == 0 { continue; }
+                            let shallow = state.shallow_sizes.get(i).copied().unwrap_or(0);
+                            rows.push(vec![
+                                serde_json::json!(obj_id),
+                                serde_json::json!(node_type),
+                                serde_json::json!(class_name.as_ref()),
+                                serde_json::json!(shallow),
+                                serde_json::json!(retained),
+                            ]);
+                            collect_all(state, child, rows);
+                        }
+                    }
+                }
+                collect_all(self, self.super_root, &mut rows);
+            }
+            TableName::LeakSuspects => {
+                for suspect in &self.leak_suspects {
+                    rows.push(vec![
+                        serde_json::json!(&suspect.class_name),
+                        serde_json::json!(suspect.object_id),
+                        serde_json::json!(suspect.retained_size),
+                        serde_json::json!(suspect.retained_percentage),
+                        serde_json::json!(&suspect.description),
+                    ]);
+                }
+            }
+        }
+        (cols, rows)
+    }
+
+    /// Execute a JOIN query using hash join.
+    fn execute_join(&self, stmt: SelectStatement, start: Instant) -> Result<QueryResult, HeapQlError> {
+        let join = stmt.join.as_ref().unwrap();
+        let left_table_str = stmt.table.to_string();
+        let right_table_str = join.right.table.to_string();
+        let left_alias = stmt.table_alias.as_deref().unwrap_or(&left_table_str);
+        let right_alias = join.right.alias.as_deref().unwrap_or(&right_table_str);
+
+        let (left_cols, left_rows) = self.scan_table(&stmt.table);
+        let (right_cols, right_rows) = self.scan_table(&join.right.table);
+
+        // Resolve join column names (strip alias prefix if present)
+        let on_left = strip_alias_prefix(&join.on_left_col, left_alias, right_alias);
+        let on_right = strip_alias_prefix(&join.on_right_col, left_alias, right_alias);
+
+        // Find column indices for join keys
+        let left_key_idx = left_cols.iter().position(|c| c == &on_left)
+            .or_else(|| left_cols.iter().position(|c| c == &join.on_left_col))
+            .ok_or_else(|| HeapQlError::UnknownColumn(on_left.clone(), stmt.table.to_string()))?;
+        let right_key_idx = right_cols.iter().position(|c| c == &on_right)
+            .or_else(|| right_cols.iter().position(|c| c == &join.on_right_col))
+            .ok_or_else(|| HeapQlError::UnknownColumn(on_right.clone(), join.right.table.to_string()))?;
+
+        // Build combined column list (prefixed with alias)
+        let mut combined_cols: Vec<String> = Vec::new();
+        for col in &left_cols {
+            combined_cols.push(format!("{}.{}", left_alias, col));
+        }
+        for col in &right_cols {
+            combined_cols.push(format!("{}.{}", right_alias, col));
+        }
+
+        // Build hash map from right table: key -> Vec<Row>
+        let mut right_map: std::collections::HashMap<String, Vec<&Row>> = std::collections::HashMap::new();
+        for row in &right_rows {
+            let key = json_value_to_join_key(&row[right_key_idx]);
+            right_map.entry(key).or_default().push(row);
+        }
+
+        let total_scanned = (left_rows.len() + right_rows.len()) as u64;
+        let mut combined_rows: Vec<Row> = Vec::new();
+
+        for left_row in &left_rows {
+            let key = json_value_to_join_key(&left_row[left_key_idx]);
+            if let Some(matches) = right_map.get(&key) {
+                for right_row in matches {
+                    let mut combined = left_row.clone();
+                    combined.extend(right_row.iter().cloned());
+                    combined_rows.push(combined);
+                }
+            } else if join.kind == JoinKind::Left {
+                // LEFT JOIN: emit nulls for right side
+                let mut combined = left_row.clone();
+                for _ in &right_cols {
+                    combined.push(serde_json::Value::Null);
+                }
+                combined_rows.push(combined);
+            }
+        }
+
+        // Apply WHERE on combined rows
+        if let Some(ref wc) = stmt.where_clause {
+            combined_rows.retain(|row| eval_where(row, &combined_cols, wc));
+        }
+
+        let total_matched = combined_rows.len() as u64;
+
+        // ORDER BY
+        if let Some(ref ob) = stmt.order_by {
+            let col_idx = combined_cols.iter().position(|c| c == &ob.column || c.ends_with(&format!(".{}", ob.column)))
+                .ok_or_else(|| HeapQlError::UnknownColumn(ob.column.clone(), "joined".into()))?;
+            combined_rows.sort_by(|a, b| {
+                let cmp = compare_json_values(&a[col_idx], &b[col_idx]);
+                if ob.descending { cmp.reverse() } else { cmp }
+            });
+        }
+
+        // LIMIT
+        if let Some(lim) = stmt.limit {
+            combined_rows.truncate(lim as usize);
+        }
+
+        // Projection
+        let (result_columns, result_rows) = if stmt.columns.len() == 1 && stmt.columns[0] == "*" {
+            (combined_cols, combined_rows)
+        } else {
+            let indices: Vec<usize> = stmt.columns.iter()
+                .filter_map(|c| {
+                    combined_cols.iter().position(|cc| cc == c)
+                        .or_else(|| combined_cols.iter().position(|cc| cc.ends_with(&format!(".{}", c))))
+                })
+                .collect();
+            let proj_cols: Vec<String> = indices.iter().map(|&i| combined_cols[i].clone()).collect();
+            let proj_rows: Vec<Row> = combined_rows.into_iter()
+                .map(|row| indices.iter().map(|&i| row[i].clone()).collect())
+                .collect();
+            (proj_cols, proj_rows)
+        };
+
+        Ok(QueryResult {
+            columns: result_columns,
+            rows: result_rows,
+            total_scanned,
+            total_matched,
+            execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
+            page: None,
+            total_pages: None,
+            total_rows: None,
+        })
+    }
+
+    /// Pre-resolve subqueries in a WHERE clause, replacing Value::Subquery with resolved values.
+    fn resolve_subqueries(&self, clause: &WhereClause, depth: usize) -> Result<WhereClause, HeapQlError> {
+        if depth > 3 {
+            return Err(HeapQlError::Execution("Subquery nesting depth exceeded (max 3)".into()));
+        }
+        match clause {
+            WhereClause::Condition(cond) => {
+                let resolved_value = match &cond.value {
+                    Value::Subquery(inner) => {
+                        let inner_result = self.execute_select(*inner.clone(), Instant::now())?;
+                        if cond.op == CompOp::In {
+                            // Collect first column values into a set
+                            let set: Vec<serde_json::Value> = inner_result.rows.iter()
+                                .filter_map(|row| row.first().cloned())
+                                .collect();
+                            Value::ResolvedSet(set)
+                        } else {
+                            // Scalar subquery: must return exactly one row with one column
+                            if inner_result.rows.len() != 1 || inner_result.rows[0].len() != 1 {
+                                return Err(HeapQlError::Execution(format!(
+                                    "Scalar subquery must return exactly one row and one column, got {} rows",
+                                    inner_result.rows.len()
+                                )));
+                            }
+                            let val = &inner_result.rows[0][0];
+                            if let Some(n) = val.as_u64() {
+                                Value::Int(n)
+                            } else if let Some(f) = val.as_f64() {
+                                Value::Float(f)
+                            } else if let Some(s) = val.as_str() {
+                                Value::String(s.to_string())
+                            } else {
+                                Value::String(val.to_string())
+                            }
+                        }
+                    }
+                    other => other.clone(),
+                };
+                Ok(WhereClause::Condition(Condition {
+                    column: cond.column.clone(),
+                    op: cond.op.clone(),
+                    value: resolved_value,
+                }))
+            }
+            WhereClause::And(a, b) => {
+                let ra = self.resolve_subqueries(a, depth + 1)?;
+                let rb = self.resolve_subqueries(b, depth + 1)?;
+                Ok(WhereClause::And(Box::new(ra), Box::new(rb)))
+            }
+            WhereClause::Or(a, b) => {
+                let ra = self.resolve_subqueries(a, depth + 1)?;
+                let rb = self.resolve_subqueries(b, depth + 1)?;
+                Ok(WhereClause::Or(Box::new(ra), Box::new(rb)))
+            }
+        }
+    }
+
+    fn execute_select(&self, mut stmt: SelectStatement, start: Instant) -> Result<QueryResult, HeapQlError> {
+        // Delegate to JOIN executor if a join is present
+        if stmt.join.is_some() {
+            return self.execute_join(stmt, start);
+        }
+
+        // Pre-resolve subqueries in WHERE clause
+        if let Some(ref wc) = stmt.where_clause {
+            if where_has_subquery(wc) {
+                stmt.where_clause = Some(self.resolve_subqueries(wc, 0)?);
+            }
+        }
+
         let all_columns: Vec<String> = table_columns(&stmt.table).iter().map(|s| s.to_string()).collect();
 
         // Check if query uses aggregates
@@ -1077,6 +1495,7 @@ impl AnalysisState {
                     total_scanned,
                     total_matched,
                     execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
+                    page: None, total_pages: None, total_rows: None,
                 });
             } else {
                 // No GROUP BY — single-row aggregate result
@@ -1102,6 +1521,7 @@ impl AnalysisState {
                     total_scanned,
                     total_matched,
                     execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
+                    page: None, total_pages: None, total_rows: None,
                 });
             }
         }
@@ -1141,7 +1561,30 @@ impl AnalysisState {
             total_scanned,
             total_matched,
             execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
+            page: None,
+            total_pages: None,
+            total_rows: None,
         })
+    }
+
+    /// Execute a query with server-side pagination.
+    pub fn execute_query_paged(&self, query_str: &str, page: u64, page_size: u64) -> Result<QueryResult, HeapQlError> {
+        let page = if page == 0 { 1 } else { page };
+        let page_size = if page_size == 0 { 500 } else { page_size };
+        let mut result = self.execute_query(query_str)?;
+        let total = result.rows.len() as u64;
+        let total_pages = if total == 0 { 1 } else { (total + page_size - 1) / page_size };
+        let start_idx = ((page - 1) * page_size) as usize;
+        let end_idx = (start_idx + page_size as usize).min(result.rows.len());
+        result.rows = if start_idx < result.rows.len() {
+            result.rows[start_idx..end_idx].to_vec()
+        } else {
+            vec![]
+        };
+        result.page = Some(page);
+        result.total_pages = Some(total_pages);
+        result.total_rows = Some(total);
+        Ok(result)
     }
 
     /// Extract object_id = X from a WHERE clause for dominator_tree queries.
@@ -1232,6 +1675,7 @@ impl AnalysisState {
                     total_scanned: 1,
                     total_matched: 1,
                     execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
+                    page: None, total_pages: None, total_rows: None,
                 })
             }
         }
@@ -1331,6 +1775,38 @@ fn reports_to_result(reports: Vec<ObjectReport>, start: Instant) -> QueryResult 
         total_scanned: len,
         total_matched: len,
         execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
+        page: None,
+        total_pages: None,
+        total_rows: None,
+    }
+}
+
+/// Convert a JSON value to a string key for hash join lookups.
+fn json_value_to_join_key(val: &serde_json::Value) -> String {
+    match val {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Strip alias prefix from a qualified column name.
+/// E.g., "i.class_name" with alias "i" -> "class_name".
+fn strip_alias_prefix(col: &str, left_alias: &str, right_alias: &str) -> String {
+    if let Some(dot_pos) = col.find('.') {
+        let prefix = &col[..dot_pos];
+        if prefix == left_alias || prefix == right_alias {
+            return col[dot_pos + 1..].to_string();
+        }
+    }
+    col.to_string()
+}
+
+/// Check if a WHERE clause contains any subqueries that need resolution.
+fn where_has_subquery(clause: &WhereClause) -> bool {
+    match clause {
+        WhereClause::Condition(cond) => matches!(cond.value, Value::Subquery(_)),
+        WhereClause::And(a, b) | WhereClause::Or(a, b) => where_has_subquery(a) || where_has_subquery(b),
     }
 }
 
@@ -1813,5 +2289,122 @@ mod tests {
             "SELECT class_name, COUNT(*) FROM instances GROUP BY node_type"
         );
         assert!(result.is_err());
+    }
+
+    // -- JOIN tests --
+
+    #[test]
+    fn test_join_instances_class_histogram() {
+        let state = build_test_state();
+        let result = state.execute_query(
+            "SELECT * FROM instances i JOIN class_histogram c ON class_name = class_name"
+        ).unwrap();
+        // Each instance row should match its class in the histogram
+        assert!(result.rows.len() >= 1);
+        // Combined columns: instances cols prefixed with "i.", histogram cols with "c."
+        assert!(result.columns.iter().any(|c| c.starts_with("i.")));
+        assert!(result.columns.iter().any(|c| c.starts_with("c.")));
+    }
+
+    #[test]
+    fn test_left_join_no_match() {
+        let state = build_test_state();
+        // LEFT JOIN leak_suspects — only CacheManager has a leak suspect entry
+        let result = state.execute_query(
+            "SELECT * FROM instances i LEFT JOIN leak_suspects l ON class_name = class_name"
+        ).unwrap();
+        // Should return all 4 instances, with nulls for non-matching leak_suspect columns
+        assert_eq!(result.rows.len(), 4);
+        // Check that some right-side columns are null (for non-CacheManager instances)
+        let null_count = result.rows.iter()
+            .filter(|row| row.last().map_or(false, |v| v.is_null()))
+            .count();
+        assert!(null_count >= 3); // 3 instances without leak suspect match
+    }
+
+    #[test]
+    fn test_join_with_where() {
+        let state = build_test_state();
+        let result = state.execute_query(
+            "SELECT * FROM instances i JOIN class_histogram c ON class_name = class_name WHERE i.retained_size > 1024"
+        ).unwrap();
+        // Should only include instances with retained_size > 1024
+        for row in &result.rows {
+            // i.retained_size is at index 4 (5th column of left table)
+            let ret_idx = result.columns.iter().position(|c| c == "i.retained_size").unwrap();
+            assert!(row[ret_idx].as_u64().unwrap() > 1024);
+        }
+    }
+
+    #[test]
+    fn test_join_with_alias() {
+        let state = build_test_state();
+        let result = state.execute_query(
+            "SELECT * FROM instances AS i INNER JOIN class_histogram AS c ON class_name = class_name LIMIT 2"
+        ).unwrap();
+        assert!(result.rows.len() <= 2);
+    }
+
+    // -- Subquery tests --
+
+    #[test]
+    fn test_subquery_scalar_avg() {
+        let state = build_test_state();
+        // AVG(retained_size) of instances = (2048 + 1024 + 1024 + 4096) / 4 = 2048
+        let result = state.execute_query(
+            "SELECT * FROM instances WHERE retained_size > (SELECT AVG(retained_size) FROM instances)"
+        ).unwrap();
+        // Only CacheManager(4096) > 2048
+        assert_eq!(result.total_matched, 1);
+        assert_eq!(result.rows[0][2], serde_json::json!("com.app.CacheManager"));
+    }
+
+    #[test]
+    fn test_subquery_in() {
+        let state = build_test_state();
+        let result = state.execute_query(
+            "SELECT * FROM instances WHERE class_name IN (SELECT class_name FROM leak_suspects)"
+        ).unwrap();
+        // Only CacheManager is in leak_suspects
+        assert_eq!(result.total_matched, 1);
+        assert_eq!(result.rows[0][2], serde_json::json!("com.app.CacheManager"));
+    }
+
+    #[test]
+    fn test_scalar_subquery_multiple_rows_error() {
+        let state = build_test_state();
+        let result = state.execute_query(
+            "SELECT * FROM instances WHERE retained_size > (SELECT retained_size FROM instances)"
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("exactly one row"));
+    }
+
+    // -- Pagination tests --
+
+    #[test]
+    fn test_pagination_page1() {
+        let state = build_test_state();
+        let result = state.execute_query_paged("SELECT * FROM instances", 1, 2).unwrap();
+        assert_eq!(result.page, Some(1));
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.total_rows, Some(4));
+        assert_eq!(result.total_pages, Some(2));
+    }
+
+    #[test]
+    fn test_pagination_page2() {
+        let state = build_test_state();
+        let result = state.execute_query_paged("SELECT * FROM instances", 2, 2).unwrap();
+        assert_eq!(result.page, Some(2));
+        assert_eq!(result.rows.len(), 2);
+    }
+
+    #[test]
+    fn test_pagination_beyond_last_page() {
+        let state = build_test_state();
+        let result = state.execute_query_paged("SELECT * FROM instances", 10, 2).unwrap();
+        assert_eq!(result.page, Some(10));
+        assert_eq!(result.rows.len(), 0);
     }
 }
