@@ -80,6 +80,9 @@ export function getRegistryJs(): string {
 
                 _activeTab = btn.dataset.tab;
 
+                // Track tab view for telemetry
+                vscode.postMessage({ command: 'tabViewed', tab: btn.dataset.tab });
+
                 // Lazy init: fire analysisComplete for this tab if not yet rendered
                 if (_analysisMsg && !_tabRendered[_activeTab] && _tabAnalysisHandlers[_activeTab]) {
                     _tabRendered[_activeTab] = true;

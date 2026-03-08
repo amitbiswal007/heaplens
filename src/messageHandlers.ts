@@ -4,6 +4,7 @@ import { AnalysisData, formatAnalysisContext } from './analysisContext';
 import { streamLlmResponse, LlmConfig, ChatMessage } from './llmClient';
 import { HEAP_ANALYSIS_SYSTEM_PROMPT, buildObjectExplainPrompt, buildLeakSuspectExplainPrompt } from './promptTemplates';
 import type { DependencyInfo } from './dependencyResolver';
+import { trackEvent, extractQueryKeyword } from './telemetry';
 
 /** Per-editor state, keyed by hprof file path. */
 export interface EditorState {
@@ -133,6 +134,7 @@ const getReferrersHandler: MessageHandler = {
 const gcRootPathHandler: MessageHandler = {
     command: 'gcRootPath',
     async handle(message, ctx) {
+        trackEvent('feature/gcRootPath');
         ctx.outputChannel.appendLine(`[HeapLens] gcRootPath request for objectId: ${message.objectId}`);
         try {
             const gcPath = await ctx.client.sendRequest('gc_root_path', {
@@ -156,6 +158,7 @@ const gcRootPathHandler: MessageHandler = {
 const inspectObjectHandler: MessageHandler = {
     command: 'inspectObject',
     async handle(message, ctx) {
+        trackEvent('feature/inspectObject');
         ctx.outputChannel.appendLine(`[HeapLens] inspectObject request for objectId: ${message.objectId}`);
         try {
             const fields = await ctx.client.sendRequest('inspect_object', {
@@ -181,6 +184,7 @@ const inspectObjectHandler: MessageHandler = {
 const explainObjectHandler: MessageHandler = {
     command: 'explainObject',
     async handle(message, ctx) {
+        trackEvent('feature/explainObject');
         const config = vscode.workspace.getConfiguration('heaplens.llm');
         const llmConfig: LlmConfig = {
             provider: config.get<string>('provider', 'anthropic'),
@@ -252,6 +256,7 @@ const explainObjectHandler: MessageHandler = {
 const explainLeakSuspectHandler: MessageHandler = {
     command: 'explainLeakSuspect',
     async handle(message, ctx) {
+        trackEvent('feature/explainLeakSuspect');
         const config = vscode.workspace.getConfiguration('heaplens.llm');
         const llmConfig: LlmConfig = {
             provider: config.get<string>('provider', 'anthropic'),
@@ -302,9 +307,18 @@ const explainLeakSuspectHandler: MessageHandler = {
     }
 };
 
+const tabViewedHandler: MessageHandler = {
+    command: 'tabViewed',
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    async handle(message, _ctx) {
+        trackEvent('feature/tabViewed', { tab: message.tab || 'unknown' });
+    }
+};
+
 const executeQueryHandler: MessageHandler = {
     command: 'executeQuery',
     async handle(message, ctx) {
+        trackEvent('feature/queryExecuted', { keyword: extractQueryKeyword(message.query || '') });
         ctx.outputChannel.appendLine(`[HeapLens] executeQuery: ${message.query}`);
         try {
             const queryResult = await ctx.client.sendRequest('execute_query', {
@@ -350,6 +364,7 @@ const listAnalyzedFilesHandler: MessageHandler = {
 const compareHeapsHandler: MessageHandler = {
     command: 'compareHeaps',
     async handle(message, ctx) {
+        trackEvent('feature/compareHeaps');
         try {
             const compareResult = await ctx.client.sendRequest('compare_heaps', {
                 current_path: ctx.hprofPath,
@@ -372,6 +387,7 @@ const compareHeapsHandler: MessageHandler = {
 const copyReportHandler: MessageHandler = {
     command: 'copyReport',
     async handle(_message, ctx) {
+        trackEvent('feature/export', { format: 'report' });
         ctx.provider.handleCopyReport(ctx.hprofPath, ctx.webviewPanel);
     }
 };
@@ -550,6 +566,7 @@ const fixWithAiHandler: MessageHandler = {
 export const allHandlers: MessageHandler[] = [
     getChildrenHandler,
     getReferrersHandler,
+    tabViewedHandler,
     chatMessageHandler,
     goToSourceHandler,
     queryDependencyInfoHandler,

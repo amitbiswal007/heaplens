@@ -5,6 +5,7 @@ import { HprofEditorProvider } from './hprofEditorProvider';
 import { registerChatParticipant } from './chatParticipant';
 import { DependencyResolver } from './dependencyResolver';
 import { setDependencyResolver } from './sourceResolver';
+import { initTelemetry, disposeTelemetry, trackEvent } from './telemetry';
 
 let outputChannel: vscode.OutputChannel | null = null;
 let editorProvider: HprofEditorProvider | null = null;
@@ -29,6 +30,8 @@ function getHprofServerPath(): string {
 export function activate(context: vscode.ExtensionContext) {
     outputChannel = vscode.window.createOutputChannel('HeapLens');
     outputChannel.appendLine('HeapLens extension activated');
+
+    initTelemetry(context);
 
     // Register custom editor for .hprof files
     editorProvider = new HprofEditorProvider(context, outputChannel, getHprofServerPath);
@@ -106,6 +109,7 @@ export function activate(context: vscode.ExtensionContext) {
                 });
 
                 if (result.success) {
+                    trackEvent('feature/export', { format: 'json' });
                     vscode.window.showInformationMessage(`HeapLens: Analysis exported to ${saveUri.fsPath}`);
                 }
             } catch (error: any) {
@@ -117,6 +121,7 @@ export function activate(context: vscode.ExtensionContext) {
     // Cleanup
     context.subscriptions.push({
         dispose: () => {
+            disposeTelemetry();
             setDependencyResolver(null);
             depResolver?.dispose();
             depResolver = null;
@@ -129,6 +134,7 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {
+    disposeTelemetry();
     setDependencyResolver(null);
     depResolver?.dispose();
     depResolver = null;

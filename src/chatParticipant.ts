@@ -15,6 +15,7 @@ import {
     buildLeaksPrompt,
     buildExplainPrompt
 } from './promptTemplates';
+import { trackEvent } from './telemetry';
 
 export function registerChatParticipant(
     context: vscode.ExtensionContext,
@@ -26,6 +27,8 @@ export function registerChatParticipant(
         stream: vscode.ChatResponseStream,
         token: vscode.CancellationToken
     ) => {
+        trackEvent('feature/copilotChat', { command: request.command || 'default' });
+
         // Check if we have analysis data
         const data = getAnalysisData();
         if (!data) {

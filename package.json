@@ -39,6 +39,10 @@
     "color": "#1e1e1e",
     "theme": "dark"
   },
+  "telemetryConnectionString": "InstrumentationKey=963d68d0-40ec-4dcb-ad11-48c8abacd67c;IngestionEndpoint=https://eastus2-3.in.applicationinsights.azure.com/;LiveEndpoint=https://eastus2.livediagnostics.monitor.azure.com/;ApplicationId=909bbca7-a6fe-4ba4-aa0c-3e04c73c8a5a",
+  "telemetry": {
+    "telemetryLevel": "all"
+  },
   "activationEvents": [
     "onCustomEditor:heaplens.hprofEditor",
     "onCommand:heaplens.analyzeFile"
@@ -175,5 +179,8 @@
     "@typescript-eslint/parser": "^5.45.0",
     "eslint": "^8.28.0",
     "typescript": "^4.9.4"
+  },
+  "dependencies": {
+    "@vscode/extension-telemetry": "^1.5.1"
   }
 }

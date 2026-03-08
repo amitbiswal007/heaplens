@@ -10,6 +10,7 @@ import type { DependencyInfo } from './dependencyResolver';
 import { allHandlers, MessageHandler, EditorState } from './messageHandlers';
 import { friendlyError } from './errorMessages';
 import { executeAiFix } from './aiFixProvider';
+import { trackEvent, classifyError } from './telemetry';
 
 /**
  * Custom readonly editor provider for .hprof files.
@@ -164,6 +165,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                 this.outputChannel.appendLine(`[HeapLens] Server process exited: code=${code}, signal=${signal}`);
                 // Notify all open webviews about the crash
                 if (code !== 0 && code !== null) {
+                    trackEvent('error/serverCrashed');
                     for (const [, state] of this.editors) {
                         if (state.webviewReady) {
                             state.webviewPanel.webview.postMessage({ command: 'serverCrashed' });
@@ -235,6 +237,14 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                 const suspectCount = (params.leak_suspects || []).length;
                 this.outputChannel.appendLine(`[HeapLens] Data: ${topObjCount} objects, ${histCount} histogram entries, ${suspectCount} leak suspects`);
 
+                trackEvent('analysis/completed', {}, {
+                    durationMs: Math.round(Date.now() - analysisStartTime),
+                    objectCount: params.summary?.total_instances || 0,
+                    classCount: params.summary?.total_classes || 0,
+                    leakSuspectCount: suspectCount,
+                    heapSizeMB: Math.round((params.summary?.total_heap_size || 0) / (1024 * 1024))
+                });
+
                 // Store analysis data for LLM integrations (per-editor)
                 const analysisData: AnalysisData = {
                     summary: params.summary || null,
@@ -273,6 +283,14 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
 
         this.outputChannel.appendLine(`[HeapLens] Sending analyze_heap request for: ${hprofPath}`);
 
+        // Track file size for telemetry
+        try {
+            const stat = fs.statSync(hprofPath);
+            trackEvent('analysis/started', {}, { fileSizeMB: Math.round(stat.size / (1024 * 1024)) });
+        } catch { /* ignore stat errors */ }
+
+        const analysisStartTime = Date.now();
+
         await vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
@@ -285,6 +303,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
 
                 // Handle VS Code cancellation
                 cancellationToken.onCancellationRequested(() => {
+                    trackEvent('analysis/cancelled');
                     this.outputChannel.appendLine('[HeapLens] User cancelled analysis');
                     // eslint-disable-next-line @typescript-eslint/no-empty-function
                     client.sendRequest('cancel_analysis', { path: hprofPath }).catch(() => {});
@@ -318,6 +337,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                         progress.report({ increment: 100, message: 'Done!' });
                     }
                 } catch (error: any) {
+                    trackEvent('analysis/failed', { errorType: classifyError(error.message || 'unknown') });
                     this.outputChannel.appendLine(`[HeapLens] ERROR: ${error.message}`);
                     vscode.window.showErrorMessage(`HeapLens: ${friendlyError(error.message)}`);
                 } finally {
@@ -350,6 +370,8 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
             baseUrl: config.get<string>('baseUrl', '') || undefined,
             model: config.get<string>('model', '') || undefined,
         };
+
+        trackEvent('feature/chatMessage', { provider: llmConfig.provider });
 
         if (!llmConfig.apiKey) {
             webviewPanel.webview.postMessage({
@@ -533,6 +555,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
             const result = await resolveSource(className);
             if (result) {
                 this.outputChannel.appendLine(`[HeapLens] Source found: tier=${result.tier}, uri=${result.uri.fsPath}`);
+                trackEvent('feature/goToSource', { tier: result.tier });
                 await vscode.window.showTextDocument(result.uri, { viewColumn: vscode.ViewColumn.Beside });
 
                 // Cache and send dependency info to webview
@@ -597,6 +620,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                 webviewPanel
             );
 
+            trackEvent('feature/fixWithAi', { status: result.status });
             switch (result.status) {
                 case 'diff-opened':
                     webviewPanel.webview.postMessage({
@@ -691,6 +715,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
                 this.heartbeatFailures++;
                 this.outputChannel.appendLine(`[HeapLens] Heartbeat failure #${this.heartbeatFailures}`);
                 if (this.heartbeatFailures >= 3) {
+                    trackEvent('error/heartbeatFailed', {}, { consecutiveFailures: this.heartbeatFailures });
                     this.outputChannel.appendLine('[HeapLens] 3 consecutive heartbeat failures — treating as crash');
                     this.stopHeartbeat();
                     for (const [, state] of this.editors) {
