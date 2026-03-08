@@ -7,6 +7,11 @@
 
 pub mod heapql;
 
+/// Test helpers for building synthetic AnalysisState instances.
+/// Available for both unit tests and integration tests.
+#[doc(hidden)]
+pub mod test_helpers;
+
 use anyhow::Result;
 use jvm_hprof::{parse_hprof, RecordTag, IdSize};
 use memmap2::{Mmap, MmapOptions};

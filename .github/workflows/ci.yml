@@ -62,7 +62,7 @@ jobs:
           restore-keys: rust-test-
       - name: Run Rust tests
         working-directory: hprof-analyzer
-        run: cargo test --release --lib
+        run: cargo test --release --lib --test integration
 
   # ── Build platform-specific VSIX packages ──────────────────────────
   # OCP: To add a new platform, add one row to matrix.include — nothing else changes.
