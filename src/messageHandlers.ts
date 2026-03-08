@@ -437,6 +437,32 @@ const exportHistogramCsvHandler: MessageHandler = {
     }
 };
 
+const exportCompareMarkdownHandler: MessageHandler = {
+    command: 'exportCompareMarkdown',
+    async handle(message, ctx) {
+        trackEvent('feature/export', { format: 'compare-markdown' });
+        await vscode.env.clipboard.writeText(message.markdown);
+        ctx.webviewPanel.webview.postMessage({ command: 'compareReportCopied' });
+        ctx.outputChannel.appendLine('[HeapLens] Compare diff report copied to clipboard');
+    }
+};
+
+const exportCompareCsvHandler: MessageHandler = {
+    command: 'exportCompareCsv',
+    async handle(message, ctx) {
+        trackEvent('feature/export', { format: 'compare-csv' });
+        const uri = await vscode.window.showSaveDialog({
+            defaultUri: vscode.Uri.file('heap-diff.csv'),
+            filters: { 'CSV': ['csv'] }
+        });
+        if (uri) {
+            const encoder = new TextEncoder();
+            await vscode.workspace.fs.writeFile(uri, encoder.encode(message.csv));
+            ctx.outputChannel.appendLine(`[HeapLens] Compare CSV exported to: ${uri.fsPath}`);
+        }
+    }
+};
+
 const cancelAnalysisHandler: MessageHandler = {
     command: 'cancelAnalysis',
     async handle(message, ctx) {
@@ -582,6 +608,8 @@ export const allHandlers: MessageHandler[] = [
     cancelAnalysisHandler,
     retryAnalysisHandler,
     exportHistogramCsvHandler,
+    exportCompareMarkdownHandler,
+    exportCompareCsvHandler,
     clearChatHistoryHandler,
     fixWithAiHandler,
     getDominatorSubtreeHandler,

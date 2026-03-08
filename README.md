@@ -22,7 +22,7 @@ HeapLens is an LLM-powered `.hprof` analyzer built on a native Rust engine. Open
 | **Waste** | Duplicate strings, empty collections, over-allocated arrays, boxed primitives |
 | **Source** | Jump to Java source — workspace files, Maven/Gradle dependency JARs, or CFR decompilation |
 | **Query** | HeapQL: SQL-like queries with autocomplete, syntax highlighting, and query history |
-| **Compare** | Diff two heap dumps side-by-side by class |
+| **Compare** | Diff two heap dumps — class deltas, leak changes, waste delta, export as markdown or CSV |
 | **Timeline** | Multi-snapshot trend analysis with D3.js line charts |
 | **AI Chat** | Ask questions in English — get HeapQL queries and insights |
 
@@ -113,7 +113,7 @@ Finds memory waste patterns automatically:
 
 ### Snapshot Comparison & Timeline
 
-- **Compare** two heap dumps: see which classes grew, shrank, or appeared/disappeared
+- **Compare** two heap dumps: summary delta, class-level growth/shrinkage with change badges, leak suspect changes (new/resolved/persisted), waste delta, and a D3.js bar chart of top changes. **Copy Report** copies a full markdown diff report to clipboard; **Export CSV** saves all class changes to a file.
 - **Timeline** multiple snapshots: track heap growth trends over time with interactive charts
 
 ![Compare](https://raw.githubusercontent.com/sachinkg12/heaplens/main/media/screenshots/compare.png)
@@ -221,6 +221,12 @@ HeapLens uses a native Rust binary for parsing and analysis. Typical performance
 | 50 MB | ~2 seconds | ~200 MB |
 | 250 MB | ~15 seconds | ~1 GB |
 | 1 GB | ~60 seconds | ~4 GB |
+
+---
+
+## Telemetry
+
+HeapLens collects anonymous usage telemetry (feature adoption, analysis performance) via Azure Application Insights to help improve the extension. **No PII, file paths, code content, or API keys are collected.** Telemetry respects VS Code's `telemetry.telemetryLevel` setting — set it to `off` to disable all telemetry.
 
 ---
 

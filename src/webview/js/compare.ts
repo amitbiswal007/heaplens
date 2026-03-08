@@ -5,9 +5,12 @@ export function getCompareJs(): string {
 
         var _compareSelect = document.getElementById('compare-select');
         var _compareBtn = document.getElementById('compare-btn');
+        var _compareExportMdBtn = document.getElementById('compare-export-md-btn');
+        var _compareExportCsvBtn = document.getElementById('compare-export-csv-btn');
         var _compareStatus = document.getElementById('compare-status');
         var _compareResults = document.getElementById('compare-results');
         var _savedBaseline = '';
+        var _lastCompareResult = null;
 
         _compareSelect.addEventListener('change', function() {
             _savedBaseline = _compareSelect.value;
@@ -100,7 +103,10 @@ export function getCompareJs(): string {
         }
 
         function renderCompareResult(result) {
+            _lastCompareResult = result;
             _compareBtn.disabled = false;
+            _compareExportMdBtn.style.display = '';
+            _compareExportCsvBtn.style.display = '';
             _compareStatus.className = 'compare-status';
             _compareStatus.textContent = '';
 
@@ -238,6 +244,102 @@ export function getCompareJs(): string {
             });
         }
 
+        // ---- Export: Markdown report ----
+        function _buildCompareMarkdown(r) {
+            var sd = r.summary_delta;
+            var lines = [];
+            lines.push('# HeapLens Diff Report');
+            lines.push('');
+            lines.push('**Baseline:** ' + r.baseline_path);
+            lines.push('**Current:** ' + r.current_path);
+            lines.push('**Generated:** ' + new Date().toISOString());
+            lines.push('');
+
+            lines.push('## Summary Delta');
+            lines.push('');
+            lines.push('| Metric | Baseline | Current | Delta |');
+            lines.push('|--------|----------|---------|-------|');
+            lines.push('| Total Heap | ' + fmt(sd.baseline_total_heap_size) + ' | ' + fmt(sd.current_total_heap_size) + ' | ' + fmtDelta(sd.total_heap_size_delta) + ' |');
+            lines.push('| Reachable | ' + fmt(sd.baseline_reachable_heap_size) + ' | ' + fmt(sd.current_reachable_heap_size) + ' | ' + fmtDelta(sd.reachable_heap_size_delta) + ' |');
+            lines.push('| Instances | ' + fmtNum(sd.baseline_total_instances) + ' | ' + fmtNum(sd.current_total_instances) + ' | ' + (sd.total_instances_delta >= 0 ? '+' : '') + fmtNum(sd.total_instances_delta) + ' |');
+            lines.push('| Classes | ' + fmtNum(sd.baseline_total_classes) + ' | ' + fmtNum(sd.current_total_classes) + ' | ' + (sd.total_classes_delta >= 0 ? '+' : '') + fmtNum(sd.total_classes_delta) + ' |');
+            lines.push('| Arrays | ' + fmtNum(sd.baseline_total_arrays) + ' | ' + fmtNum(sd.current_total_arrays) + ' | ' + (sd.total_arrays_delta >= 0 ? '+' : '') + fmtNum(sd.total_arrays_delta) + ' |');
+            lines.push('| GC Roots | ' + fmtNum(sd.baseline_total_gc_roots) + ' | ' + fmtNum(sd.current_total_gc_roots) + ' | ' + (sd.total_gc_roots_delta >= 0 ? '+' : '') + fmtNum(sd.total_gc_roots_delta) + ' |');
+            lines.push('');
+
+            var hd = r.histogram_delta || [];
+            if (hd.length > 0) {
+                var top = hd.slice(0, 30);
+                lines.push('## Top Class Changes (by retained size delta)');
+                lines.push('');
+                lines.push('| Class | Change | Instances (\u0394) | Shallow (\u0394) | Retained (\u0394) | Baseline Ret. | Current Ret. |');
+                lines.push('|-------|--------|----------------|---------------|----------------|---------------|--------------|');
+                top.forEach(function(d) {
+                    lines.push('| ' + d.class_name + ' | ' + d.change_type + ' | ' + (d.instance_count_delta >= 0 ? '+' : '') + fmtNum(d.instance_count_delta) + ' | ' + fmtDelta(d.shallow_size_delta) + ' | ' + fmtDelta(d.retained_size_delta) + ' | ' + fmt(d.baseline_retained_size) + ' | ' + fmt(d.current_retained_size) + ' |');
+                });
+                if (hd.length > 30) lines.push('');
+                if (hd.length > 30) lines.push('*...and ' + (hd.length - 30) + ' more classes*');
+                lines.push('');
+            }
+
+            var lsc = r.leak_suspect_changes || [];
+            if (lsc.length > 0) {
+                lines.push('## Leak Suspect Changes');
+                lines.push('');
+                lsc.forEach(function(l) {
+                    var label = l.change_type === 'new' ? 'NEW' : (l.change_type === 'resolved' ? 'RESOLVED' : 'PERSISTED');
+                    lines.push('- **[' + label + '] ' + l.class_name + '**');
+                    lines.push('  ' + l.description);
+                    if (l.change_type === 'persisted' || l.change_type === 'new') {
+                        var detail = '';
+                        if (l.baseline_retained_size > 0) detail += 'Baseline: ' + fmt(l.baseline_retained_size) + ' (' + l.baseline_retained_percentage.toFixed(1) + '%) -> ';
+                        detail += 'Current: ' + fmt(l.current_retained_size) + ' (' + l.current_retained_percentage.toFixed(1) + '%)';
+                        if (l.retained_size_delta !== 0) detail += ' (' + fmtDelta(l.retained_size_delta) + ')';
+                        lines.push('  ' + detail);
+                    } else if (l.change_type === 'resolved') {
+                        lines.push('  Was: ' + fmt(l.baseline_retained_size) + ' (' + l.baseline_retained_percentage.toFixed(1) + '%)');
+                    }
+                });
+                lines.push('');
+            }
+
+            var wd = r.waste_delta;
+            if (wd) {
+                lines.push('## Waste Delta');
+                lines.push('');
+                lines.push('| Metric | Delta |');
+                lines.push('|--------|-------|');
+                lines.push('| Total Waste | ' + fmtDelta(wd.total_wasted_delta) + ' |');
+                lines.push('| Waste % | ' + (wd.waste_percentage_delta >= 0 ? '+' : '') + wd.waste_percentage_delta.toFixed(1) + 'pp |');
+                lines.push('| Duplicate Strings | ' + fmtDelta(wd.duplicate_string_wasted_delta) + ' |');
+                lines.push('| Empty Collections | ' + fmtDelta(wd.empty_collection_wasted_delta) + ' |');
+                lines.push('');
+            }
+
+            return lines.join('\\n');
+        }
+
+        // ---- Export: CSV ----
+        function _buildCompareCsv(r) {
+            var hd = r.histogram_delta || [];
+            var lines = ['Class,Change Type,Instance Count Delta,Shallow Size Delta,Retained Size Delta,Baseline Instances,Baseline Shallow,Baseline Retained,Current Instances,Current Shallow,Current Retained'];
+            hd.forEach(function(d) {
+                var name = d.class_name.indexOf(',') !== -1 ? '"' + d.class_name + '"' : d.class_name;
+                lines.push([name, d.change_type, d.instance_count_delta, d.shallow_size_delta, d.retained_size_delta, d.baseline_instance_count, d.baseline_shallow_size, d.baseline_retained_size, d.current_instance_count, d.current_shallow_size, d.current_retained_size].join(','));
+            });
+            return lines.join('\\n');
+        }
+
+        _compareExportMdBtn.addEventListener('click', function() {
+            if (!_lastCompareResult) return;
+            vscode.postMessage({ command: 'exportCompareMarkdown', markdown: _buildCompareMarkdown(_lastCompareResult) });
+        });
+
+        _compareExportCsvBtn.addEventListener('click', function() {
+            if (!_lastCompareResult) return;
+            vscode.postMessage({ command: 'exportCompareCsv', csv: _buildCompareCsv(_lastCompareResult) });
+        });
+
         // ---- Self-register ----
         onMessage('analyzedFiles', function(msg) {
             populateBaselineDropdown(msg.files || []);
@@ -249,6 +351,12 @@ export function getCompareJs(): string {
 
         onMessage('compareError', function(msg) {
             renderCompareError(msg.error);
+        });
+
+        onMessage('compareReportCopied', function() {
+            _compareStatus.className = 'compare-status';
+            _compareStatus.textContent = 'Diff report copied to clipboard!';
+            setTimeout(function() { _compareStatus.textContent = ''; }, 3000);
         });
 
         onTabActivate('compare', function() {

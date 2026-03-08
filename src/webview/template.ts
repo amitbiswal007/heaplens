@@ -160,6 +160,8 @@ export function getHtmlTemplate(): string {
                 <option value="">-- Select a baseline --</option>
             </select>
             <button class="btn" id="compare-btn" disabled>Compare</button>
+            <button class="btn" id="compare-export-md-btn" style="display:none; margin-left:8px;" title="Copy diff report to clipboard">Copy Report</button>
+            <button class="btn" id="compare-export-csv-btn" style="display:none; margin-left:4px;" title="Export class changes as CSV">Export CSV</button>
             <span class="compare-status" id="compare-status" aria-live="polite"></span>
         </div>
         <div id="compare-results"></div>
