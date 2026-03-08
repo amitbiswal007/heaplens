@@ -1,0 +1,137 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Fast checks (TypeScript lint + compile) ────────────────────────
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run compile
+
+  # ── Rust unit tests ────────────────────────────────────────────────
+  test-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            hprof-analyzer/target
+          key: rust-test-${{ hashFiles('hprof-analyzer/Cargo.toml') }}
+          restore-keys: rust-test-
+      - name: Run Rust tests
+        working-directory: hprof-analyzer
+        run: cargo test --release --lib
+
+  # ── Build platform-specific VSIX packages ──────────────────────────
+  # OCP: To add a new platform, add one row to matrix.include — nothing else changes.
+  build:
+    needs: [lint, test-rust]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            rust_target: aarch64-apple-darwin
+            vsce_target: darwin-arm64
+            binary: hprof-server
+          - os: macos-13
+            rust_target: x86_64-apple-darwin
+            vsce_target: darwin-x64
+            binary: hprof-server
+          - os: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-gnu
+            vsce_target: linux-x64
+            binary: hprof-server
+          - os: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            vsce_target: win32-x64
+            binary: hprof-server.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            hprof-analyzer/target
+          key: ${{ matrix.rust_target }}-cargo-${{ hashFiles('hprof-analyzer/Cargo.toml') }}
+          restore-keys: ${{ matrix.rust_target }}-cargo-
+
+      - name: Build Rust binary
+        working-directory: hprof-analyzer
+        run: cargo build --release --target ${{ matrix.rust_target }}
+
+      - name: Stage binary in bin/
+        shell: bash
+        run: |
+          mkdir -p bin
+          cp "hprof-analyzer/target/${{ matrix.rust_target }}/release/${{ matrix.binary }}" bin/
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Package VSIX
+        shell: bash
+        run: npx @vscode/vsce package --target ${{ matrix.vsce_target }}
+
+      - name: Upload VSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: vsix-${{ matrix.vsce_target }}
+          path: '*.vsix'
+
+  # ── Publish to Marketplace + GitHub Release (tags only) ────────────
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: vsix-*
+          merge-multiple: true
+
+      - name: Publish to VS Code Marketplace
+        run: npx @vscode/vsce publish --packagePath *.vsix
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: '*.vsix'
+          generate_release_notes: true

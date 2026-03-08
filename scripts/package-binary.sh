@@ -10,6 +10,12 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST_DIR="$REPO_ROOT/hprof-analyzer"
 BIN_DIR="$REPO_ROOT/bin"
 
+# In CI, the workflow pre-builds and stages the binary — skip redundant build
+if [[ "${CI:-}" == "true" ]] && { [[ -f "$BIN_DIR/hprof-server" ]] || [[ -f "$BIN_DIR/hprof-server.exe" ]]; }; then
+    echo "==> CI: Pre-built binary found in bin/, skipping Rust build."
+    exit 0
+fi
+
 PROFILE="release"
 if [[ "${1:-}" == "--debug" ]]; then
     PROFILE="debug"
