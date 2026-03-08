@@ -4,6 +4,7 @@
 
 HeapLens is an LLM-powered `.hprof` analyzer built on a native Rust engine. Open any heap dump and instantly explore dominator trees, class histograms, leak suspects, and more through an interactive tabbed UI. Ask questions in plain English and get structured HeapQL query results.
 
+![HeapLens Demo](https://raw.githubusercontent.com/sachinkg12/HeapScope/main/media/screenshots/demo.gif)
 ![HeapLens Overview](https://raw.githubusercontent.com/sachinkg12/HeapScope/main/media/screenshots/overview.png)
 
 ---
@@ -25,6 +26,9 @@ HeapLens is an LLM-powered `.hprof` analyzer built on a native Rust engine. Open
 | **Timeline** | Multi-snapshot trend analysis with D3.js line charts |
 | **AI Chat** | Ask questions in English — get HeapQL queries and insights |
 
+![Heap Composition](https://raw.githubusercontent.com/sachinkg12/HeapScope/main/media/screenshots/heap_composition.png)
+![Leak Suspects](https://raw.githubusercontent.com/sachinkg12/HeapScope/main/media/screenshots/leak_suspects.png)
+
 ### Dominator Tree Actions
 
 Every node in the dominator tree has one-click actions:
@@ -33,6 +37,9 @@ Every node in the dominator tree has one-click actions:
 - **Inspect** — opens a field-level inspector panel with primitive values and reference links
 - **Go to source** — jumps to the `.java` file (workspace, dependency JAR, or decompiled)
 - **Show referrers** — "Who references this object?" with recursive drill-down
+
+![Dominator Tree](https://raw.githubusercontent.com/sachinkg12/HeapScope/main/media/screenshots/dominator_tree.png)
+![Explain Object](https://raw.githubusercontent.com/sachinkg12/HeapScope/main/media/screenshots/explain_object.png)
 
 ### HeapQL Query Language
 
@@ -61,6 +68,8 @@ ORDER BY SUM(retained_size) DESC LIMIT 10
 **Aggregates:** `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`
 **Size literals:** `1KB`, `5MB`, `1GB`
 
+![HeapQL Query](https://raw.githubusercontent.com/sachinkg12/HeapScope/main/media/screenshots/query.png)
+
 ### AI-Powered Analysis
 
 Configure any of the 10 supported LLM providers and ask questions in the **AI Chat** tab. Supports **Anthropic**, **OpenAI**, **Google Gemini**, **DeepSeek**, **Mistral**, **Groq**, **xAI (Grok)**, **Together AI**, **OpenRouter**, and **Ollama** (local):
@@ -71,9 +80,14 @@ Configure any of the 10 supported LLM providers and ask questions in the **AI Ch
 
 The LLM responds with explanations **and** runnable HeapQL queries. Click **Run Query** to execute them inline.
 
+![AI Chat](https://raw.githubusercontent.com/sachinkg12/HeapScope/main/media/screenshots/ai_chat.png)
+![Fix Recommendation](https://raw.githubusercontent.com/sachinkg12/HeapScope/main/media/screenshots/fix_recommendation.png)
+
 ### Instance Enumeration
 
 Click any class name in the **Histogram** tab to see all instances of that class. Each instance row has action buttons for inspect, show referrers, and "Why alive?" — no need to manually write queries.
+
+![Histogram](https://raw.githubusercontent.com/sachinkg12/HeapScope/main/media/screenshots/histogram.png)
 
 ### Source Code Bridge
 
@@ -82,6 +96,9 @@ Three-tier source resolution:
 1. **Workspace** — finds `.java` files in your project
 2. **Dependencies** — extracts from Maven/Gradle source JARs (`~/.m2`, `~/.gradle`)
 3. **Decompilation** — falls back to CFR decompiler when source JARs are unavailable
+
+![View Source](https://raw.githubusercontent.com/sachinkg12/HeapScope/main/media/screenshots/view_source.png)
+![Source](https://raw.githubusercontent.com/sachinkg12/HeapScope/main/media/screenshots/source.png)
 
 ### Waste Detection
 
@@ -92,10 +109,14 @@ Finds memory waste patterns automatically:
 - **Over-allocated collections** — arrays sized far beyond their element count
 - **Boxed primitives** — `Integer`, `Long`, etc. that could be primitive
 
+![Waste Detection](https://raw.githubusercontent.com/sachinkg12/HeapScope/main/media/screenshots/waste.png)
+
 ### Snapshot Comparison & Timeline
 
 - **Compare** two heap dumps: see which classes grew, shrank, or appeared/disappeared
 - **Timeline** multiple snapshots: track heap growth trends over time with interactive charts
+
+![Compare](https://raw.githubusercontent.com/sachinkg12/HeapScope/main/media/screenshots/compare.png)
 
 ---
 
@@ -104,6 +125,8 @@ Finds memory waste patterns automatically:
 1. **Install** HeapLens from the VS Code Marketplace
 2. **Open** any `.hprof` file — HeapLens activates automatically
 3. **Explore** the 10 tabs: Overview for a summary, Histogram to find big classes, Dominator Tree to drill down
+
+![Loading HPROF](https://raw.githubusercontent.com/sachinkg12/HeapScope/main/media/screenshots/Hprof_loading.png)
 
 ### Generate a Heap Dump
 
