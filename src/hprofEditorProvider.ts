@@ -27,16 +27,15 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         allHandlers.map(h => [h.command, h])
     );
 
-    private rustClient: RustClient | null = null;
     private outputChannel: vscode.OutputChannel;
     /** Per-editor state keyed by hprof file path. */
     private editors = new Map<string, EditorState>();
     /** Tracks the most recently focused editor's hprof path. */
     private activeHprofPath: string | null = null;
-    /** Heartbeat interval handle. */
-    private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-    /** Consecutive heartbeat failures. */
-    private heartbeatFailures = 0;
+    /** Per-editor heartbeat intervals. */
+    private heartbeatIntervals = new Map<string, ReturnType<typeof setInterval>>();
+    /** Per-editor heartbeat failure counts. */
+    private heartbeatFailures = new Map<string, number>();
 
     constructor(
         private readonly context: vscode.ExtensionContext,
@@ -79,10 +78,29 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         const hprofPath = document.uri.fsPath;
         this.activeHprofPath = hprofPath;
 
+        this.outputChannel.show(true);
+        this.outputChannel.appendLine(`[HeapLens] Opening HPROF file: ${hprofPath}`);
+        this.outputChannel.appendLine(`[HeapLens] File exists: ${fs.existsSync(hprofPath)}`);
+
+        webviewPanel.webview.html = getWebviewContent(webviewPanel.webview, this.context.extensionUri);
+
+        // Create a per-editor Rust client (each editor gets its own server subprocess)
+        const client = this.createClient(hprofPath);
+        if (!client) {
+            this.outputChannel.appendLine('[HeapLens] ERROR: Failed to create Rust client');
+            webviewPanel.webview.postMessage({
+                command: 'error',
+                message: 'Failed to start analysis server'
+            });
+            return;
+        }
+        this.outputChannel.appendLine('[HeapLens] Per-editor Rust client created successfully');
+
         // Create per-editor state (restore chat from workspace storage)
         const savedChat = this.loadChatHistory(hprofPath);
         const editorState: EditorState = {
             webviewPanel,
+            client,
             analysisData: null,
             chatHistory: savedChat,
             pendingWebviewMessage: null,
@@ -92,27 +110,16 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         };
         this.editors.set(hprofPath, editorState);
 
-        this.outputChannel.show(true);
-        this.outputChannel.appendLine(`[HeapLens] Opening HPROF file: ${hprofPath}`);
-        this.outputChannel.appendLine(`[HeapLens] File exists: ${fs.existsSync(hprofPath)}`);
-
-        webviewPanel.webview.html = getWebviewContent(webviewPanel.webview, this.context.extensionUri);
-
-        // Ensure Rust client is running
-        const client = this.getOrCreateClient();
-        if (!client) {
-            this.outputChannel.appendLine('[HeapLens] ERROR: Failed to create Rust client');
-            webviewPanel.webview.postMessage({
-                command: 'error',
-                message: 'Failed to start analysis server'
-            });
-            return;
-        }
-        this.outputChannel.appendLine('[HeapLens] Rust client created successfully');
-
         // Clean up when the editor tab is closed
         webviewPanel.onDidDispose(() => {
             this.outputChannel.appendLine(`[HeapLens] Editor disposed for: ${hprofPath}`);
+            // Dispose the per-editor client (kills the subprocess)
+            const state = this.editors.get(hprofPath);
+            if (state?.client && !state.client.isDisposed) {
+                state.client.dispose();
+                this.outputChannel.appendLine(`[HeapLens] Per-editor client disposed for: ${hprofPath}`);
+            }
+            this.stopHeartbeat(hprofPath);
             this.editors.delete(hprofPath);
             if (this.activeHprofPath === hprofPath) {
                 this.activeHprofPath = null;
@@ -141,12 +148,7 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         await this.analyzeFile(hprofPath, webviewPanel, client);
     }
 
-    private getOrCreateClient(): RustClient | null {
-        if (this.rustClient && !this.rustClient.isDisposed) {
-            this.outputChannel.appendLine('[HeapLens] Reusing existing Rust client');
-            return this.rustClient;
-        }
-
+    private createClient(hprofPath: string): RustClient | null {
         const serverPath = this.getServerPath();
         this.outputChannel.appendLine(`[HeapLens] Server binary path: ${serverPath}`);
         this.outputChannel.appendLine(`[HeapLens] Server binary exists: ${fs.existsSync(serverPath)}`);
@@ -157,26 +159,24 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         }
 
         try {
-            this.rustClient = new RustClient(serverPath);
-            this.rustClient.onStderr = (msg: string) => {
-                this.outputChannel.appendLine(`[server] ${msg.trim()}`);
+            const client = new RustClient(serverPath);
+            client.onStderr = (msg: string) => {
+                this.outputChannel.appendLine(`[server:${hprofPath}] ${msg.trim()}`);
             };
-            this.rustClient.onProcessExit = (code: number | null, signal: string | null) => {
-                this.outputChannel.appendLine(`[HeapLens] Server process exited: code=${code}, signal=${signal}`);
-                // Notify all open webviews about the crash
+            client.onProcessExit = (code: number | null, signal: string | null) => {
+                this.outputChannel.appendLine(`[HeapLens] Server process exited for ${hprofPath}: code=${code}, signal=${signal}`);
+                // Notify only this editor's webview about the crash
                 if (code !== 0 && code !== null) {
                     trackEvent('error/serverCrashed');
-                    for (const [, state] of this.editors) {
-                        if (state.webviewReady) {
-                            state.webviewPanel.webview.postMessage({ command: 'serverCrashed' });
-                        }
+                    const state = this.editors.get(hprofPath);
+                    if (state?.webviewReady) {
+                        state.webviewPanel.webview.postMessage({ command: 'serverCrashed' });
                     }
                 }
-                this.rustClient = null;
             };
-            this.outputChannel.appendLine('[HeapLens] Rust server process spawned');
-            this.startHeartbeat();
-            return this.rustClient;
+            this.outputChannel.appendLine(`[HeapLens] Rust server process spawned for: ${hprofPath}`);
+            this.startHeartbeat(hprofPath, client);
+            return client;
         } catch (error: any) {
             this.outputChannel.appendLine(`[HeapLens] ERROR spawning server: ${error.message}`);
             vscode.window.showErrorMessage(`Failed to start HeapLens server: ${error.message}`);
@@ -667,8 +667,21 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         this.context.workspaceState.update(key, undefined);
     }
 
+    /** Compatibility shim: returns the active editor's client. */
     public getRustClient(): RustClient | null {
-        return this.rustClient;
+        if (this.activeHprofPath) {
+            const state = this.editors.get(this.activeHprofPath);
+            if (state?.client && !state.client.isDisposed) {
+                return state.client;
+            }
+        }
+        return null;
+    }
+
+    /** Get the client for a specific hprof file. */
+    public getEditorClient(hprofPath: string): RustClient | null {
+        const state = this.editors.get(hprofPath);
+        return state?.client && !state.client.isDisposed ? state.client : null;
     }
 
     public getAnalysisData(): AnalysisData | null {
@@ -700,47 +713,51 @@ export class HprofEditorProvider implements vscode.CustomReadonlyEditorProvider 
         return this.activeHprofPath;
     }
 
-    private startHeartbeat(): void {
-        this.stopHeartbeat();
-        this.heartbeatFailures = 0;
-        this.heartbeatInterval = setInterval(async () => {
-            if (!this.rustClient || this.rustClient.isDisposed) {
-                this.stopHeartbeat();
+    private startHeartbeat(hprofPath: string, client: RustClient): void {
+        this.stopHeartbeat(hprofPath);
+        this.heartbeatFailures.set(hprofPath, 0);
+        const interval = setInterval(async () => {
+            if (!client || client.isDisposed) {
+                this.stopHeartbeat(hprofPath);
                 return;
             }
-            const ok = await this.rustClient.ping(5000);
+            const ok = await client.ping(5000);
             if (ok) {
-                this.heartbeatFailures = 0;
+                this.heartbeatFailures.set(hprofPath, 0);
             } else {
-                this.heartbeatFailures++;
-                this.outputChannel.appendLine(`[HeapLens] Heartbeat failure #${this.heartbeatFailures}`);
-                if (this.heartbeatFailures >= 3) {
-                    trackEvent('error/heartbeatFailed', {}, { consecutiveFailures: this.heartbeatFailures });
-                    this.outputChannel.appendLine('[HeapLens] 3 consecutive heartbeat failures — treating as crash');
-                    this.stopHeartbeat();
-                    for (const [, state] of this.editors) {
-                        if (state.webviewReady) {
-                            state.webviewPanel.webview.postMessage({ command: 'serverCrashed' });
-                        }
+                const failures = (this.heartbeatFailures.get(hprofPath) || 0) + 1;
+                this.heartbeatFailures.set(hprofPath, failures);
+                this.outputChannel.appendLine(`[HeapLens] Heartbeat failure #${failures} for ${hprofPath}`);
+                if (failures >= 3) {
+                    trackEvent('error/heartbeatFailed', {}, { consecutiveFailures: failures });
+                    this.outputChannel.appendLine(`[HeapLens] 3 consecutive heartbeat failures for ${hprofPath} — treating as crash`);
+                    this.stopHeartbeat(hprofPath);
+                    const state = this.editors.get(hprofPath);
+                    if (state?.webviewReady) {
+                        state.webviewPanel.webview.postMessage({ command: 'serverCrashed' });
                     }
-                    this.rustClient = null;
                 }
             }
         }, 15000);
+        this.heartbeatIntervals.set(hprofPath, interval);
     }
 
-    private stopHeartbeat(): void {
-        if (this.heartbeatInterval) {
-            clearInterval(this.heartbeatInterval);
-            this.heartbeatInterval = null;
+    private stopHeartbeat(hprofPath: string): void {
+        const interval = this.heartbeatIntervals.get(hprofPath);
+        if (interval) {
+            clearInterval(interval);
+            this.heartbeatIntervals.delete(hprofPath);
         }
+        this.heartbeatFailures.delete(hprofPath);
     }
 
     public dispose(): void {
-        this.stopHeartbeat();
-        if (this.rustClient) {
-            this.rustClient.dispose();
-            this.rustClient = null;
+        // Dispose all per-editor clients and heartbeats
+        for (const [hprofPath, state] of this.editors) {
+            this.stopHeartbeat(hprofPath);
+            if (state.client && !state.client.isDisposed) {
+                state.client.dispose();
+            }
         }
         this.editors.clear();
     }

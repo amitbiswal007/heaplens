@@ -10,6 +10,7 @@ import { evaluateAlerts } from './diffAlerts';
 /** Per-editor state, keyed by hprof file path. */
 export interface EditorState {
     webviewPanel: vscode.WebviewPanel;
+    client: RustClient;
     analysisData: AnalysisData | null;
     chatHistory: ChatMessage[];
     pendingWebviewMessage: any;
@@ -322,10 +323,13 @@ const executeQueryHandler: MessageHandler = {
         trackEvent('feature/queryExecuted', { keyword: extractQueryKeyword(message.query || '') });
         ctx.outputChannel.appendLine(`[HeapLens] executeQuery: ${message.query}`);
         try {
-            const queryResult = await ctx.client.sendRequest('execute_query', {
+            const rpcParams: any = {
                 path: ctx.hprofPath,
                 query: message.query
-            });
+            };
+            if (message.page) { rpcParams.page = message.page; }
+            if (message.pageSize) { rpcParams.page_size = message.pageSize; }
+            const queryResult = await ctx.client.sendRequest('execute_query', rpcParams);
             ctx.webviewPanel.webview.postMessage({
                 command: 'queryResult',
                 result: queryResult,

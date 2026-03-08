@@ -21,7 +21,7 @@ export function getQueryJs(): string {
         var _acBlurTimer = null;
 
         // ---- HeapQL schema ----
-        var _hqlKeywords = ['SELECT','FROM','WHERE','ORDER','BY','ASC','DESC','LIMIT','AND','OR','LIKE','COUNT','SUM','AVG','MIN','MAX','GROUP'];
+        var _hqlKeywords = ['SELECT','FROM','WHERE','ORDER','BY','ASC','DESC','LIMIT','AND','OR','LIKE','COUNT','SUM','AVG','MIN','MAX','GROUP','JOIN','INNER','LEFT','ON','AS','IN'];
         var _hqlTables = ['instances','class_histogram','dominator_tree','leak_suspects'];
         var _hqlTableColumns = {
             instances: ['object_id','node_type','class_name','shallow_size','retained_size'],
@@ -508,6 +508,8 @@ export function getQueryJs(): string {
 
         var QUERY_ROW_LIMIT = 500;
 
+        var _lastPaginatedQuery = null;
+
         function renderQueryResult(result, query) {
             _queryRunBtn.disabled = false;
             _addToHistory(query);
@@ -517,15 +519,24 @@ export function getQueryJs(): string {
             var scanned = result.total_scanned || 0;
             var matched = result.total_matched || 0;
             var timeMs = (result.execution_time_ms || 0).toFixed(1);
+            var isPaginated = result.page != null;
             var totalRows = rows.length;
-            var truncated = totalRows > QUERY_ROW_LIMIT;
+            var truncated = !isPaginated && totalRows > QUERY_ROW_LIMIT;
             var displayRows = truncated ? rows.slice(0, QUERY_ROW_LIMIT) : rows;
 
-            _queryStatus.className = 'query-status';
-            _queryStatus.textContent = displayRows.length + ' row' + (displayRows.length !== 1 ? 's' : '') +
-                ' returned (' + matched + ' matched, ' + scanned + ' scanned, ' + timeMs + 'ms)';
+            if (isPaginated) {
+                _lastPaginatedQuery = query;
+                _queryStatus.className = 'query-status';
+                _queryStatus.textContent = displayRows.length + ' row' + (displayRows.length !== 1 ? 's' : '') +
+                    ' (page ' + result.page + '/' + result.total_pages + ', ' + result.total_rows + ' total, ' + timeMs + 'ms)';
+            } else {
+                _lastPaginatedQuery = null;
+                _queryStatus.className = 'query-status';
+                _queryStatus.textContent = displayRows.length + ' row' + (displayRows.length !== 1 ? 's' : '') +
+                    ' returned (' + matched + ' matched, ' + scanned + ' scanned, ' + timeMs + 'ms)';
+            }
 
-            if (rows.length === 0) {
+            if (rows.length === 0 && !isPaginated) {
                 _queryResults.innerHTML = '<div style="opacity:0.5; padding:12px;">No results</div>';
                 return;
             }
@@ -560,7 +571,31 @@ export function getQueryJs(): string {
                 html += '</tr>';
             });
             html += '</tbody></table>';
+
+            if (isPaginated) {
+                html += '<div class="query-pagination" style="display:flex;align-items:center;gap:8px;padding:8px 0;">';
+                var prevDisabled = result.page <= 1 ? ' disabled' : '';
+                var nextDisabled = result.page >= result.total_pages ? ' disabled' : '';
+                html += '<button class="query-page-btn" data-page="' + (result.page - 1) + '"' + prevDisabled + '>Prev</button>';
+                html += '<span>Page ' + result.page + ' of ' + result.total_pages + '</span>';
+                html += '<button class="query-page-btn" data-page="' + (result.page + 1) + '"' + nextDisabled + '>Next</button>';
+                html += '</div>';
+            }
+
             _queryResults.innerHTML = html;
+
+            if (isPaginated) {
+                var pageBtns = _queryResults.querySelectorAll('.query-page-btn');
+                pageBtns.forEach(function(btn) {
+                    btn.addEventListener('click', function() {
+                        if (btn.disabled) return;
+                        var page = parseInt(btn.getAttribute('data-page'), 10);
+                        if (_lastPaginatedQuery && page >= 1) {
+                            vscode.postMessage({ command: 'executeQuery', query: _lastPaginatedQuery, page: page, pageSize: 500 });
+                        }
+                    });
+                });
+            }
         }
 
         function renderQueryError(error, query) {
