@@ -5,6 +5,7 @@ import { streamLlmResponse, LlmConfig, ChatMessage } from './llmClient';
 import { HEAP_ANALYSIS_SYSTEM_PROMPT, buildObjectExplainPrompt, buildLeakSuspectExplainPrompt } from './promptTemplates';
 import type { DependencyInfo } from './dependencyResolver';
 import { trackEvent, extractQueryKeyword } from './telemetry';
+import { evaluateAlerts } from './diffAlerts';
 
 /** Per-editor state, keyed by hprof file path. */
 export interface EditorState {
@@ -374,6 +375,7 @@ const compareHeapsHandler: MessageHandler = {
                 command: 'compareResult',
                 result: compareResult
             });
+            evaluateAlerts(compareResult, ctx);
         } catch (error: any) {
             ctx.outputChannel.appendLine(`[HeapLens] compareHeaps error: ${error.message}`);
             ctx.webviewPanel.webview.postMessage({

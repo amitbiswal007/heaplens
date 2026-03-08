@@ -160,6 +160,18 @@
           "type": "boolean",
           "default": true,
           "description": "When source JARs are unavailable, decompile .class files using CFR decompiler (requires java on PATH)"
+        },
+        "heaplens.alerts.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show notifications for significant findings when comparing heap dumps"
+        },
+        "heaplens.alerts.heapGrowthThreshold": {
+          "type": "number",
+          "default": 25,
+          "minimum": 1,
+          "maximum": 500,
+          "description": "Heap growth percentage threshold for alert (default: 25%)"
         }
       }
     }
