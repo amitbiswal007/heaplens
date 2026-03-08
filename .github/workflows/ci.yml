@@ -51,7 +51,7 @@ jobs:
             rust_target: aarch64-apple-darwin
             vsce_target: darwin-arm64
             binary: hprof-server
-          - os: macos-13
+          - os: macos-14
             rust_target: x86_64-apple-darwin
             vsce_target: darwin-x64
             binary: hprof-server
