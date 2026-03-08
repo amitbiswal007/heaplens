@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: VS Code Marketplace
+    url: https://marketplace.visualstudio.com/items?itemName=guptasachinn.heaplens
+    about: Install HeapLens from the VS Code Marketplace
