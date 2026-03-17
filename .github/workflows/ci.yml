@@ -31,7 +31,8 @@ jobs:
           git add package.json package-lock.json
           git commit -m "chore(release): ${NEW_VERSION}"
           git tag "${NEW_VERSION}"
-          git push origin main --follow-tags
+          git push origin main
+          git push origin "${NEW_VERSION}"
 
   # ── Fast checks (TypeScript lint + compile) ────────────────────────
   lint:
