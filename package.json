@@ -1,7 +1,7 @@
 {
   "name": "heaplens",
-  "displayName": "HeapLens",
-  "description": "LLM-powered Java heap dump analyzer — dominator tree, leak detection, HeapQL queries, AI chat, and interactive D3.js visualizations for .hprof files",
+  "displayName": "HeapLens — Java & Android Heap Dump Analyzer",
+  "description": "Analyze Java & Android heap dumps (.hprof) directly in VS Code — find memory leaks, explore dominator trees, and get AI-powered fix suggestions in seconds. A faster, smarter alternative to Eclipse MAT and VisualVM. Parses 1 GB dumps in ~60s with a native Rust engine. 10 interactive views including HeapQL (SQL for heap objects), leak detection, waste analysis, and multi-snapshot comparison. Free and open source.",
   "version": "1.0.6",
   "publisher": "guptasachinn",
   "license": "Apache-2.0",
@@ -20,25 +20,37 @@
   "categories": [
     "Debuggers",
     "Visualization",
-    "Programming Languages",
-    "Other"
+    "Data Science",
+    "Programming Languages"
   ],
   "keywords": [
     "java",
-    "heap",
-    "hprof",
-    "memory",
+    "heap-dump",
+    "memory-leak",
     "profiler",
-    "leak",
-    "jvm",
-    "dominator",
-    "garbage-collection",
-    "android"
+    "hprof"
   ],
   "galleryBanner": {
-    "color": "#1e1e1e",
+    "color": "#0D1117",
     "theme": "dark"
   },
+  "badges": [
+    {
+      "url": "https://img.shields.io/visual-studio-marketplace/v/guptasachinn.heaplens",
+      "href": "https://marketplace.visualstudio.com/items?itemName=guptasachinn.heaplens",
+      "description": "VS Code Marketplace Version"
+    },
+    {
+      "url": "https://img.shields.io/github/license/sachinkg12/heaplens",
+      "href": "https://github.com/sachinkg12/heaplens/blob/main/LICENSE",
+      "description": "License"
+    },
+    {
+      "url": "https://img.shields.io/github/stars/sachinkg12/heaplens",
+      "href": "https://github.com/sachinkg12/heaplens",
+      "description": "GitHub Stars"
+    }
+  ],
   "telemetryConnectionString": "InstrumentationKey=963d68d0-40ec-4dcb-ad11-48c8abacd67c;IngestionEndpoint=https://eastus2-3.in.applicationinsights.azure.com/;LiveEndpoint=https://eastus2.livediagnostics.monitor.azure.com/;ApplicationId=909bbca7-a6fe-4ba4-aa0c-3e04c73c8a5a",
   "telemetry": {
     "telemetryLevel": "all"

@@ -37,5 +37,9 @@ Thumbs.db
 /doc/
 /docs/
 
+# Large media originals
+media/screenshots/demo-original.gif
+*.vsix
+
 # Claude Code
 CLAUDE.md
