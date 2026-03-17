@@ -155,17 +155,6 @@ jobs:
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
 
-      - name: Publish universal build to keep it in sync
-        run: |
-          mkdir -p universal-build && cd universal-build
-          git clone --depth 1 --branch "${GITHUB_REF_NAME}" https://github.com/${GITHUB_REPOSITORY}.git .
-          npm ci
-          mkdir -p bin && touch bin/hprof-server
-          npx @vscode/vsce package
-          npx @vscode/vsce publish --packagePath heaplens-*.vsix
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
