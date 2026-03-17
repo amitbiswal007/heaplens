@@ -20,6 +20,12 @@ CLAUDE.md
 CHANGELOG.md
 CONTRIBUTING.md
 
+# Screenshots & media (served from GitHub, not needed in VSIX)
+media/screenshots/
+
+# JVM agent source (users build separately)
+jvm-agent/
+
 # Source SVG (PNG is used by the extension)
 icon.svg
 
@@ -36,6 +42,11 @@ Thumbs.db
 # Git
 .git/
 .gitignore
+
+# Strip source maps and browser bundles from production deps (saves ~90MB)
+**/*.js.map
+**/browser/
+**/dist-esm/
 
 # Node dev dependencies are excluded by vsce automatically
 # (do NOT add node_modules/ here — it would also strip production deps like @vscode/extension-telemetry)
