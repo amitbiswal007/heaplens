@@ -5,6 +5,7 @@
 [![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/guptasachinn.heaplens)](https://marketplace.visualstudio.com/items?itemName=guptasachinn.heaplens)
 [![Installs](https://img.shields.io/visual-studio-marketplace/i/guptasachinn.heaplens)](https://marketplace.visualstudio.com/items?itemName=guptasachinn.heaplens)
 [![License](https://img.shields.io/github/license/sachinkg12/heaplens)](LICENSE)
+[![DOI](https://zenodo.org/badge/1133285320.svg)](https://doi.org/10.5281/zenodo.19121302)
 
 ![HeapLens Demo](https://raw.githubusercontent.com/sachinkg12/heaplens/main/media/screenshots/demo.gif)
 ![HeapLens Overview](https://raw.githubusercontent.com/sachinkg12/heaplens/main/media/screenshots/overview.png)

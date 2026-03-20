@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+title: "HeapLens: AI-Powered Java & Android Heap Dump Analyzer"
+message: "If you use HeapLens in your research, please cite it using this metadata."
+type: software
+authors:
+  - given-names: Sachin
+    family-names: Gupta
+doi: 10.5281/zenodo.19121302
+version: 1.0.9
+date-released: "2026-03-19"
+license: Apache-2.0
+repository-code: https://github.com/sachinkg12/heaplens
+keywords:
+  - heap-dump
+  - hprof
+  - java
+  - android
+  - memory-leak
+  - profiler
+  - memory-analysis
+  - AI
+  - LLM
+  - "VS Code"
