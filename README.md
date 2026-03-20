@@ -77,9 +77,9 @@ ORDER BY SUM(retained_size) DESC LIMIT 10
 :refs 123456789
 ```
 
-**Tables:** `instances`, `class_histogram`, `dominator_tree`, `leak_suspects`
-**Aggregates:** `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`
-**Size literals:** `1KB`, `5MB`, `1GB`
+- **Tables:** `instances`, `class_histogram`, `dominator_tree`, `leak_suspects`
+- **Aggregates:** `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`
+- **Size literals:** `1KB`, `5MB`, `1GB`
 
 ![HeapQL Query](https://raw.githubusercontent.com/sachinkg12/heaplens/main/media/screenshots/query.png)
 
