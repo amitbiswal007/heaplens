@@ -4,20 +4,24 @@ import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
   title: 'HeapLens',
-  tagline: 'LLM-Powered Java Heap Dump Analyzer',
+  tagline: 'AI-Powered Java Heap Dump Analyzer',
   favicon: 'img/favicon.ico',
 
   future: {
     v4: true,
   },
 
-  url: 'https://heaplens.dev',
-  baseUrl: '/',
+  url: 'https://sachinkg12.github.io',
+  baseUrl: '/heaplens/',
 
   organizationName: 'sachinkg12',
   projectName: 'HeapLens',
 
   onBrokenLinks: 'throw',
+
+  markdown: {
+    mermaid: true,
+  },
 
   i18n: {
     defaultLocale: 'en',
@@ -30,7 +34,7 @@ const config: Config = {
       {
         docs: {
           sidebarPath: './sidebars.ts',
-          editUrl: 'https://github.com/sachinkg12/HeapLens/tree/main/docs-site/',
+          editUrl: 'https://github.com/sachinkg12/heaplens/tree/main/docs-site/',
         },
         blog: false,
         theme: {
@@ -40,6 +44,8 @@ const config: Config = {
     ],
   ],
 
+  themes: ['@docusaurus/theme-mermaid'],
+
   themeConfig: {
     colorMode: {
       defaultMode: 'dark',
@@ -47,6 +53,10 @@ const config: Config = {
     },
     navbar: {
       title: 'HeapLens',
+      logo: {
+        alt: 'HeapLens Logo',
+        src: 'img/logo.svg',
+      },
       items: [
         {
           type: 'docSidebar',
@@ -55,7 +65,7 @@ const config: Config = {
           label: 'Documentation',
         },
         {
-          href: 'https://github.com/sachinkg12/HeapLens',
+          href: 'https://github.com/sachinkg12/heaplens',
           label: 'GitHub',
           position: 'right',
         },
@@ -69,7 +79,7 @@ const config: Config = {
           items: [
             { label: 'Getting Started', to: '/docs/getting-started/installation' },
             { label: 'Concepts', to: '/docs/concepts/heap-dump-fundamentals' },
-            { label: 'Tabs Guide', to: '/docs/tabs-guide/overview-tab' },
+            { label: 'Views Guide', to: '/docs/tabs-guide/overview-tab' },
           ],
         },
         {
@@ -82,7 +92,7 @@ const config: Config = {
         {
           title: 'More',
           items: [
-            { label: 'GitHub', href: 'https://github.com/sachinkg12/HeapLens' },
+            { label: 'GitHub', href: 'https://github.com/sachinkg12/heaplens' },
             { label: 'Runbook', to: '/docs/runbook/troubleshooting' },
           ],
         },
@@ -92,7 +102,7 @@ const config: Config = {
     prism: {
       theme: prismThemes.github,
       darkTheme: prismThemes.dracula,
-      additionalLanguages: ['rust', 'bash', 'json', 'toml'],
+      additionalLanguages: ['rust', 'bash', 'json', 'toml', 'java', 'sql'],
     },
   } satisfies Preset.ThemeConfig,
 };
