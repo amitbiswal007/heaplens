@@ -126,8 +126,10 @@ Finds memory waste patterns automatically:
 
 ### Snapshot Comparison & Timeline
 
-- **Compare** two heap dumps: summary delta, class-level growth/shrinkage with change badges, leak suspect changes (new/resolved/persisted), waste delta, and a D3.js bar chart of top changes. **Copy Report** copies a full markdown diff report to clipboard; **Export CSV** saves all class changes to a file.
-- **Timeline** multiple snapshots: track heap growth trends over time with interactive charts
+- **Compare** two heap dumps: summary delta, class-level growth/shrinkage with change badges, leak suspect changes (new/resolved/persisted), waste delta, and a D3.js bar chart of top changes.
+- **Copy Report** copies a full markdown diff report to clipboard.
+- **Export CSV** saves all class changes to a file.
+- **Timeline** multiple snapshots: track heap growth trends over time with interactive charts.
 
 ![Compare](https://raw.githubusercontent.com/sachinkg12/heaplens/main/media/screenshots/compare.png)
 
